@@ -6,93 +6,124 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 
 class VPNService {
-  // CHANGE THIS TO YOUR PYTHONANYWHERE USERNAME
-  static const String BACKEND_URL = 'https://konabalan.pythonanywhere.com';
-  
   static String? androidId;
   static List<String> configServers = [];
   static bool isConnected = false;
   static String? currentSubscriptionLink;
+  static bool isSubscriptionValid = false;
   
-  // Initialize and get Android ID
+  // Initialize
   static Future<void> init() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       
-      // Check if running on web or mobile
+      // Get device ID for tracking
       if (!kIsWeb) {
         final deviceInfo = DeviceInfoPlugin();
-        
-        // Get Android ID for device tracking
         if (Platform.isAndroid) {
           final androidInfo = await deviceInfo.androidInfo;
           androidId = androidInfo.id ?? 'unknown';
         } else {
-          androidId = 'web_test_id';
+          androidId = 'ios_device';
         }
       } else {
-        // Running on web - use a test ID
         androidId = 'web_test_${DateTime.now().millisecondsSinceEpoch}';
       }
       
-      // Store first install time for anti-abuse
-      if (!prefs.containsKey('first_install')) {
-        prefs.setString('first_install', DateTime.now().toIso8601String());
-      }
-      
-      // Load saved subscription link if exists
+      // Load saved subscription link
       currentSubscriptionLink = prefs.getString('subscription_link');
+      
+      // If we have a saved subscription, validate it
+      if (currentSubscriptionLink != null && currentSubscriptionLink!.isNotEmpty) {
+        await validateSubscription();
+      }
     } catch (e) {
       print('Init error: $e');
       androidId = 'fallback_${DateTime.now().millisecondsSinceEpoch}';
     }
   }
   
-  // Check subscription status with backend
-  static Future<Map<String, dynamic>> checkSubscription() async {
-    try {
-      final response = await http.post(
-        Uri.parse('$BACKEND_URL/check_trial'),
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'android_id': androidId}),
-      ).timeout(Duration(seconds: 10));
-      
-      if (response.statusCode == 200) {
-        return jsonDecode(response.body);
-      }
-    } catch (e) {
-      print('Error checking subscription: $e');
+  // Validate and fetch configs from subscription link
+  static Future<bool> validateSubscription() async {
+    if (currentSubscriptionLink == null || currentSubscriptionLink!.isEmpty) {
+      isSubscriptionValid = false;
+      return false;
     }
-    return {'status': 'error', 'message': 'Cannot connect to server'};
-  }
-  
-  // Save subscription link
-  static Future<void> saveSubscriptionLink(String link) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('subscription_link', link);
-    currentSubscriptionLink = link;
-  }
-  
-  // Fetch configs from subscription link
-  static Future<bool> fetchConfigs(String url) async {
+    
     try {
-      final response = await http.get(Uri.parse(url))
+      print('Validating subscription: $currentSubscriptionLink');
+      
+      // Fetch configs from the subscription link
+      final response = await http.get(Uri.parse(currentSubscriptionLink!))
           .timeout(Duration(seconds: 15));
       
       if (response.statusCode == 200) {
-        // Split configs by newline and filter empty lines
-        configServers = response.body
+        String content = response.body;
+        
+        // Check if subscription is expired (your backend returns this specific config when expired)
+        if (content.contains('SUBSCRIPTION_EXPIRED')) {
+          print('Subscription expired');
+          isSubscriptionValid = false;
+          configServers = [];
+          return false;
+        }
+        
+        // Parse the configs
+        configServers = content
             .split('\n')
             .where((line) => line.trim().isNotEmpty)
+            .where((line) => !line.startsWith('#')) // Remove comments
             .toList();
         
         print('Loaded ${configServers.length} servers');
-        return configServers.isNotEmpty;
+        isSubscriptionValid = configServers.isNotEmpty;
+        return isSubscriptionValid;
+      } else if (response.statusCode == 403) {
+        // Invalid token or not activated
+        print('Invalid subscription token');
+        isSubscriptionValid = false;
+        return false;
       }
     } catch (e) {
-      print('Error fetching configs: $e');
+      print('Error validating subscription: $e');
+      isSubscriptionValid = false;
     }
+    
     return false;
+  }
+  
+  // Save subscription link
+  static Future<bool> saveSubscriptionLink(String link) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      
+      // Clean the link
+      link = link.trim();
+      
+      // Basic validation - should be a konabalan.pythonanywhere.com link
+      if (!link.contains('pythonanywhere.com/sub/')) {
+        return false;
+      }
+      
+      currentSubscriptionLink = link;
+      await prefs.setString('subscription_link', link);
+      
+      // Validate the new subscription
+      bool isValid = await validateSubscription();
+      return isValid;
+    } catch (e) {
+      print('Error saving subscription: $e');
+      return false;
+    }
+  }
+  
+  // Clear subscription
+  static Future<void> clearSubscription() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('subscription_link');
+    currentSubscriptionLink = null;
+    isSubscriptionValid = false;
+    configServers = [];
   }
   
   // Smart server selection with chunk scanning
@@ -238,11 +269,13 @@ class VPNService {
       if (config.contains('://') && config.contains('@')) {
         // Format: protocol://uuid@host:port
         String afterProtocol = config.split('://')[1];
-        String hostPart = afterProtocol.split('@')[1];
-        host = hostPart.split(':')[0].split('?')[0].split('#')[0];
+        if (afterProtocol.contains('@')) {
+          String hostPart = afterProtocol.split('@')[1];
+          host = hostPart.split(':')[0].split('?')[0].split('#')[0];
+        }
       }
       
-      if (host.isNotEmpty) {
+      if (host.isNotEmpty && host != '127.0.0.1') {
         final result = await InternetAddress.lookup(host)
             .timeout(Duration(seconds: 2));
         return result.isNotEmpty && result[0].rawAddress.isNotEmpty;
@@ -281,26 +314,5 @@ class VPNService {
     } catch (e) {
       print('Disconnect error: $e');
     }
-  }
-  
-  // Check if device was wiped (anti-abuse)
-  static Future<bool> checkDeviceWipe() async {
-    final prefs = await SharedPreferences.getInstance();
-    String? firstInstall = prefs.getString('first_install');
-    
-    if (firstInstall == null) {
-      return false; // First time install
-    }
-    
-    // Check if app data was cleared but device ID is same
-    // This indicates potential abuse
-    final deviceCheck = prefs.getString('device_check_$androidId');
-    if (deviceCheck == null && androidId != null) {
-      // Device was likely wiped
-      await prefs.setString('device_check_$androidId', DateTime.now().toIso8601String());
-      return true;
-    }
-    
-    return false;
   }
 }

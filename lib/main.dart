@@ -33,10 +33,10 @@ class VPNHomePage extends StatefulWidget {
 class _VPNHomePageState extends State<VPNHomePage> with SingleTickerProviderStateMixin {
   String status = 'Initializing...';
   bool isConnecting = false;
-  String subscriptionStatus = 'checking';
   String? serverInfo;
   late AnimationController _animationController;
   late Animation<double> _pulseAnimation;
+  bool hasValidSubscription = false;
   
   @override
   void initState() {
@@ -75,93 +75,35 @@ class _VPNHomePageState extends State<VPNHomePage> with SingleTickerProviderStat
     // Initialize VPN service
     await VPNService.init();
     
-    // Check for device wipe abuse
-    bool wasWiped = await VPNService.checkDeviceWipe();
-    if (wasWiped) {
-      _showAbuseWarning();
-      return;
-    }
-    
-    // Check subscription status
-    final subInfo = await VPNService.checkSubscription();
-    
-    setState(() {
-      subscriptionStatus = subInfo['status'] ?? 'error';
-    });
-    
-    if (subscriptionStatus == 'expired') {
-      _showExpiredDialog();
-    } else if (subscriptionStatus == 'trial') {
-      // Show trial info
-      String trialEnd = subInfo['trial_end'] ?? '';
-      _showTrialInfo(trialEnd);
+    // Check if we have a saved subscription
+    if (VPNService.currentSubscriptionLink != null) {
+      setState(() {
+        status = 'Validating subscription...';
+      });
       
-      // Load trial configs
-      String configUrl = subInfo['config_url'] ?? '';
-      bool loaded = await VPNService.fetchConfigs(configUrl);
+      bool isValid = await VPNService.validateSubscription();
       
       setState(() {
-        status = loaded ? 'Ready to connect' : 'Failed to load servers';
+        hasValidSubscription = isValid;
+        if (isValid) {
+          status = 'Ready to connect';
+        } else {
+          status = 'Subscription expired or invalid';
+          _showSubscriptionDialog(isExpired: true);
+        }
       });
-    } else if (subscriptionStatus == 'active') {
-      // Load subscription configs
-      String configUrl = subInfo['config_url'] ?? VPNService.currentSubscriptionLink ?? '';
-      
-      if (configUrl.isEmpty) {
-        _showEnterSubscriptionDialog();
-      } else {
-        bool loaded = await VPNService.fetchConfigs(configUrl);
-        setState(() {
-          status = loaded ? 'Ready to connect' : 'Failed to load servers';
-        });
-      }
-    } else if (subscriptionStatus == 'error') {
+    } else {
       setState(() {
-        status = 'Connection error. Check internet.';
+        hasValidSubscription = false;
+        status = 'No subscription';
       });
+      _showSubscriptionDialog(isExpired: false);
     }
   }
   
-  void _showTrialInfo(String trialEnd) {
-    try {
-      DateTime endDate = DateTime.parse(trialEnd);
-      int daysLeft = endDate.difference(DateTime.now()).inDays;
-      
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Free trial: $daysLeft days remaining'),
-          backgroundColor: Colors.blue,
-          duration: Duration(seconds: 3),
-        ),
-      );
-    } catch (e) {
-      // Error parsing date
-    }
-  }
-  
-  void _showAbuseWarning() {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: Text('⚠️ Warning', style: TextStyle(color: Colors.red)),
-        content: Text(
-          'This device has been flagged for attempting to bypass trial limitations. '
-          'Please purchase a subscription to continue using AsadVPN.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              launchUrl(Uri.parse('https://t.me/VPNProxyTestSupport'));
-            },
-            child: Text('Get Subscription'),
-          ),
-        ],
-      ),
-    );
-  }
-  
-  void _showExpiredDialog() {
+  void _showSubscriptionDialog({required bool isExpired}) {
+    final TextEditingController linkController = TextEditingController();
+    
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -169,29 +111,32 @@ class _VPNHomePageState extends State<VPNHomePage> with SingleTickerProviderStat
         backgroundColor: Color(0xFF1a1a2e),
         title: Row(
           children: [
-            Icon(Icons.timer_off, color: Colors.orange),
+            Icon(
+              isExpired ? Icons.timer_off : Icons.vpn_key,
+              color: isExpired ? Colors.orange : Colors.blue,
+            ),
             SizedBox(width: 8),
-            Text('Trial Expired'),
+            Text(isExpired ? 'Subscription Expired' : 'Enter Subscription'),
           ],
         ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              'Your 7-day free trial has ended.',
+              isExpired 
+                ? 'Your subscription has expired. Please enter a new subscription link.'
+                : 'Enter your subscription link to activate AsadVPN:',
               style: TextStyle(color: Colors.white70),
             ),
             SizedBox(height: 20),
-            Text(
-              'Enter your subscription link or get one from our support:',
-              style: TextStyle(fontSize: 12, color: Colors.white54),
-            ),
-            SizedBox(height: 16),
             TextField(
+              controller: linkController,
               style: TextStyle(color: Colors.white),
               decoration: InputDecoration(
                 labelText: 'Subscription Link',
                 labelStyle: TextStyle(color: Colors.white54),
+                hintText: 'https://konabalan.pythonanywhere.com/sub/...',
+                hintStyle: TextStyle(color: Colors.white30, fontSize: 12),
                 border: OutlineInputBorder(
                   borderSide: BorderSide(color: Colors.white30),
                 ),
@@ -203,13 +148,11 @@ class _VPNHomePageState extends State<VPNHomePage> with SingleTickerProviderStat
                 ),
                 prefixIcon: Icon(Icons.link, color: Colors.white54),
               ),
-              onSubmitted: (value) async {
-                if (value.trim().isNotEmpty) {
-                  await VPNService.saveSubscriptionLink(value.trim());
-                  Navigator.pop(context);
-                  _initialize();
-                }
-              },
+            ),
+            SizedBox(height: 10),
+            Text(
+              'Example: https://konabalan.pythonanywhere.com/sub/YOUR_TOKEN',
+              style: TextStyle(fontSize: 10, color: Colors.white38),
             ),
           ],
         ),
@@ -227,50 +170,51 @@ class _VPNHomePageState extends State<VPNHomePage> with SingleTickerProviderStat
               ],
             ),
           ),
-        ],
-      ),
-    );
-  }
-  
-  void _showEnterSubscriptionDialog() {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        backgroundColor: Color(0xFF1a1a2e),
-        title: Text('Enter Subscription'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              'Please enter your subscription link:',
-              style: TextStyle(color: Colors.white70),
-            ),
-            SizedBox(height: 16),
-            TextField(
-              style: TextStyle(color: Colors.white),
-              decoration: InputDecoration(
-                labelText: 'Subscription Link',
-                labelStyle: TextStyle(color: Colors.white54),
-                border: OutlineInputBorder(),
-                prefixIcon: Icon(Icons.link, color: Colors.white54),
-              ),
-              onSubmitted: (value) async {
-                if (value.trim().isNotEmpty) {
-                  await VPNService.saveSubscriptionLink(value.trim());
-                  Navigator.pop(context);
-                  _initialize();
-                }
-              },
-            ),
-          ],
-        ),
-        actions: [
           TextButton(
-            onPressed: () {
-              launchUrl(Uri.parse('https://t.me/VPNProxyTestSupport'));
+            onPressed: () async {
+              String link = linkController.text.trim();
+              if (link.isNotEmpty) {
+                // Show loading
+                Navigator.pop(context);
+                setState(() {
+                  status = 'Validating subscription...';
+                });
+                
+                bool success = await VPNService.saveSubscriptionLink(link);
+                
+                if (success) {
+                  setState(() {
+                    hasValidSubscription = true;
+                    status = 'Ready to connect';
+                  });
+                  
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Subscription activated successfully!'),
+                      backgroundColor: Colors.green,
+                    ),
+                  );
+                } else {
+                  setState(() {
+                    hasValidSubscription = false;
+                    status = 'Invalid subscription';
+                  });
+                  
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Invalid subscription link. Please check and try again.'),
+                      backgroundColor: Colors.red,
+                    ),
+                  );
+                  
+                  // Show dialog again
+                  Future.delayed(Duration(seconds: 1), () {
+                    _showSubscriptionDialog(isExpired: false);
+                  });
+                }
+              }
             },
-            child: Text('Get Subscription'),
+            child: Text('Activate'),
           ),
         ],
       ),
@@ -278,6 +222,11 @@ class _VPNHomePageState extends State<VPNHomePage> with SingleTickerProviderStat
   }
   
   Future<void> _toggleConnection() async {
+    if (!hasValidSubscription) {
+      _showSubscriptionDialog(isExpired: false);
+      return;
+    }
+    
     if (VPNService.isConnected) {
       // Disconnect
       setState(() {
@@ -296,6 +245,19 @@ class _VPNHomePageState extends State<VPNHomePage> with SingleTickerProviderStat
         isConnecting = true;
         status = 'Scanning servers...';
       });
+      
+      // Check subscription validity again before connecting
+      bool isValid = await VPNService.validateSubscription();
+      
+      if (!isValid) {
+        setState(() {
+          isConnecting = false;
+          hasValidSubscription = false;
+          status = 'Subscription expired';
+        });
+        _showSubscriptionDialog(isExpired: true);
+        return;
+      }
       
       // Smart server selection
       Map<String, dynamic> result = await VPNService.selectBestServer();
@@ -392,7 +354,7 @@ class _VPNHomePageState extends State<VPNHomePage> with SingleTickerProviderStat
                 ScaleTransition(
                   scale: _pulseAnimation,
                   child: GestureDetector(
-                    onTap: (isConnecting || subscriptionStatus == 'expired') ? null : _toggleConnection,
+                    onTap: isConnecting ? null : _toggleConnection,
                     child: Container(
                       width: 180,
                       height: 180,
@@ -403,7 +365,9 @@ class _VPNHomePageState extends State<VPNHomePage> with SingleTickerProviderStat
                               ? [Color(0xFF00ff88), Color(0xFF00cc66)]
                               : isConnecting
                                   ? [Colors.orange, Colors.orangeAccent]
-                                  : [Color(0xFF667eea), Color(0xFF764ba2)],
+                                  : hasValidSubscription
+                                      ? [Color(0xFF667eea), Color(0xFF764ba2)]
+                                      : [Colors.grey, Colors.grey.shade700],
                           begin: Alignment.topLeft,
                           end: Alignment.bottomRight,
                         ),
@@ -413,7 +377,9 @@ class _VPNHomePageState extends State<VPNHomePage> with SingleTickerProviderStat
                                 ? Colors.green.withOpacity(0.4)
                                 : isConnecting
                                     ? Colors.orange.withOpacity(0.4)
-                                    : Colors.blue.withOpacity(0.4),
+                                    : hasValidSubscription
+                                        ? Colors.blue.withOpacity(0.4)
+                                        : Colors.grey.withOpacity(0.2),
                             blurRadius: 30,
                             spreadRadius: 10,
                           ),
@@ -465,23 +431,27 @@ class _VPNHomePageState extends State<VPNHomePage> with SingleTickerProviderStat
                 
                 Spacer(),
                 
-                // Bottom info
-                if (subscriptionStatus == 'trial')
-                  Container(
-                    margin: EdgeInsets.only(bottom: 20),
-                    padding: EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: Colors.blue.withOpacity(0.2),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Text(
-                      '🎁 Free Trial Active',
-                      style: TextStyle(
-                        color: Colors.blue,
-                        fontSize: 14,
-                      ),
-                    ),
+                // Bottom buttons
+                Padding(
+                  padding: EdgeInsets.only(bottom: 30),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      // Change Subscription button
+                      if (VPNService.currentSubscriptionLink != null)
+                        TextButton.icon(
+                          onPressed: () {
+                            _showSubscriptionDialog(isExpired: false);
+                          },
+                          icon: Icon(Icons.edit, size: 16),
+                          label: Text('Change Subscription'),
+                          style: TextButton.styleFrom(
+                            foregroundColor: Colors.white54,
+                          ),
+                        ),
+                    ],
                   ),
+                ),
               ],
             ),
           ),
