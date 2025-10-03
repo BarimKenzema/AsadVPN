@@ -457,7 +457,7 @@ class VPNService {
     if (config.toLowerCase().startsWith('ss://')) return 'Shadowsocks';
     return 'Unknown';
   }
-    // PROPER V2Ray JSON configuration generator - FIXED VERSION
+    // PROPER V2Ray JSON configuration generator - COMPLETELY FIXED VERSION
   static String generateV2RayConfig(String vlessUri) {
     try {
       print('Generating V2Ray config from: ${vlessUri.substring(0, min(50, vlessUri.length))}...');
@@ -487,7 +487,102 @@ class VPNService {
       
       print('Parsed: uuid=$uuid, address=$address, port=$port, type=$type, security=$security');
       
-      // Create the V2Ray JSON configuration
+      // Build the config step by step to avoid type issues
+      // Start with basic structure
+      Map<String, dynamic> outbound = {
+        "protocol": "vless",
+        "tag": "proxy"
+      };
+      
+      // Build settings
+      Map<String, dynamic> settings = {
+        "vnext": [
+          {
+            "address": address,
+            "port": port,
+            "users": [
+              {
+                "id": uuid,
+                "encryption": encryption,
+                "level": 0
+              }
+            ]
+          }
+        ]
+      };
+      
+      // Add flow if exists
+      if (flow.isNotEmpty && flow != 'none') {
+        settings["vnext"][0]["users"][0]["flow"] = flow;
+      }
+      
+      outbound["settings"] = settings;
+      
+      // Build streamSettings
+      Map<String, dynamic> streamSettings = {
+        "network": type,
+        "security": security
+      };
+      
+      // Add TLS settings if needed
+      if (security == 'tls') {
+        streamSettings["tlsSettings"] = {
+          "serverName": sni,
+          "allowInsecure": false,
+          "fingerprint": fp,
+          "alpn": alpn.split(',')
+        };
+      }
+      
+      // Add transport settings based on type
+      if (type == 'ws') {
+        String path = params['path'] ?? '/';
+        String host = params['host'] ?? address;
+        
+        streamSettings["wsSettings"] = {
+          "path": path,
+          "headers": {
+            "Host": host
+          }
+        };
+      } else if (type == 'grpc') {
+        String serviceName = params['serviceName'] ?? '';
+        
+        streamSettings["grpcSettings"] = {
+          "serviceName": serviceName
+        };
+      } else if (type == 'tcp') {
+        String headerType = params['headerType'] ?? 'none';
+        
+        if (headerType == 'http') {
+          String httpHost = params['host'] ?? address;
+          String httpPath = params['path'] ?? '/';
+          
+          streamSettings["tcpSettings"] = {
+            "header": {
+              "type": "http",
+              "request": {
+                "version": "1.1",
+                "method": "GET",
+                "path": [httpPath],
+                "headers": {
+                  "Host": [httpHost],
+                  "User-Agent": [
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                  ],
+                  "Accept-Encoding": ["gzip, deflate"],
+                  "Connection": ["keep-alive"],
+                  "Pragma": "no-cache"
+                }
+              }
+            }
+          };
+        }
+      }
+      
+      outbound["streamSettings"] = streamSettings;
+      
+      // Build the complete config
       Map<String, dynamic> config = {
         "log": {
           "loglevel": "warning"
@@ -524,29 +619,7 @@ class VPNService {
           }
         ],
         "outbounds": [
-          {
-            "protocol": "vless",
-            "settings": {
-              "vnext": [
-                {
-                  "address": address,
-                  "port": port,
-                  "users": [
-                    {
-                      "id": uuid,
-                      "encryption": encryption,
-                      "level": 0
-                    }
-                  ]
-                }
-              ]
-            },
-            "streamSettings": {
-              "network": type,
-              "security": security
-            },
-            "tag": "proxy"
-          },
+          outbound,
           {
             "protocol": "freedom",
             "settings": {},
@@ -559,6 +632,23 @@ class VPNService {
           }
         ]
       };
+      
+      // Convert to JSON string
+      String jsonConfig = jsonEncode(config);
+      print('Generated V2Ray config successfully, length: ${jsonConfig.length}');
+      
+      // Log first 500 chars of config for debugging
+      print('Config preview: ${jsonConfig.substring(0, min(500, jsonConfig.length))}...');
+      
+      return jsonConfig;
+      
+    } catch (e, stack) {
+      print('Error generating V2Ray config: $e');
+      print('Stack trace: $stack');
+      print('URI that caused error: $vlessUri');
+      return '';
+    }
+  }
       
       // Add flow if exists and not empty
       if (flow.isNotEmpty && flow != 'none') {
