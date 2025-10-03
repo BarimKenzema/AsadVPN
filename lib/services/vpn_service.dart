@@ -515,29 +515,12 @@ class VPNService {
           // Request VPN permission
           await flutterV2ray.requestPermission();
           
-          print('Starting V2Ray with direct config...');
+          print('Starting V2Ray with config...');
           
-          // flutter_v2ray should accept VLESS URIs directly
-          // If it needs JSON, we create a minimal wrapper
-          String finalConfig = config;
-          
-          // Check if flutter_v2ray needs JSON format
-          if (!config.startsWith('{')) {
-            // Create minimal JSON wrapper for the URI
-            Map<String, dynamic> jsonConfig = {
-              "remarks": "AsadVPN Server",
-              "outbound": config,
-              "dns": {
-                "servers": ["8.8.8.8", "1.1.1.1"]
-              }
-            };
-            finalConfig = jsonEncode(jsonConfig);
-          }
-          
-          // Start V2Ray
+          // Start V2Ray with the VLESS URI directly
           await flutterV2ray.startV2Ray(
             remark: "AsadVPN",
-            config: config, // Try with original URI first
+            config: config,
             bypassSubnets: ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"],
           );
           
@@ -553,35 +536,7 @@ class VPNService {
           return true;
         } catch (e) {
           print('V2Ray connection error: $e');
-          
-          // Try alternative connection method
-          try {
-            print('Trying alternative connection method...');
-            
-            // Import the config first
-            await flutterV2ray.importConfig(
-              remark: "AsadVPN Import",
-              config: config,
-            );
-            
-            // Then start with the imported config
-            await flutterV2ray.startV2Ray(
-              remark: "AsadVPN Import",
-              config: "",
-              bypassSubnets: ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"],
-            );
-            
-            isConnected = true;
-            startBackgroundScanning();
-            
-            final prefs = await SharedPreferences.getInstance();
-            await prefs.setString('last_config', config);
-            
-            return true;
-          } catch (e2) {
-            print('Alternative connection also failed: $e2');
-            return false;
-          }
+          return false;
         }
       }
       
