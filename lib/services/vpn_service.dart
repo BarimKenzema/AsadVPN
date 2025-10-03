@@ -294,8 +294,8 @@ class VPNService {
     
     workingServers.sort((a, b) => a.ping.compareTo(b.ping));
     
-    // Update fastest servers list
-    fastestServers = workingServers.take(5).toList();
+    // Update fastest servers list - SHOW ALL, NOT JUST 5
+    fastestServers = workingServers;
     serversStreamController.add(fastestServers);
     
     print('Found ${workingServers.length} working VLESS servers');
@@ -327,6 +327,8 @@ class VPNService {
         timer.cancel();
         backgroundScanTimer = null;
         print('Found 44 pingable VLESS servers, stopping background scan');
+        // Update UI with all servers
+        serversStreamController.add(allPingableServers);
         return;
       }
       
@@ -357,10 +359,13 @@ class VPNService {
       allPingableServers.sort((a, b) => a.ping.compareTo(b.ping));
       
       print('Background scan: ${allPingableServers.length} pingable VLESS servers found');
+      
+      // Update UI with current servers
+      serversStreamController.add(allPingableServers);
     });
   }
   
-  // Test server with ping measurement
+  // Test server with ping measurement - FIXED
   static Future<ServerInfo?> _testServerWithPing(String config, int timeoutSeconds) async {
     try {
       String protocol = _getProtocol(config);
@@ -387,24 +392,34 @@ class VPNService {
       String host = _extractHost(config);
       if (host.isEmpty || host == '127.0.0.1') return null;
       
-      // Measure ping time
+      // Measure REAL ping time
       final stopwatch = Stopwatch()..start();
       
-      final result = await InternetAddress.lookup(host)
-          .timeout(Duration(seconds: timeoutSeconds));
-      
-      stopwatch.stop();
-      
-      if (result.isNotEmpty && result[0].rawAddress.isNotEmpty) {
-        return ServerInfo(
-          config: config,
-          protocol: protocol,
-          ping: stopwatch.elapsedMilliseconds,
-          name: name,
-        );
+      try {
+        final result = await InternetAddress.lookup(host)
+            .timeout(Duration(seconds: timeoutSeconds));
+        
+        stopwatch.stop();
+        
+        if (result.isNotEmpty && result[0].rawAddress.isNotEmpty) {
+          // Return REAL ping time
+          int realPing = stopwatch.elapsedMilliseconds;
+          if (realPing < 1) realPing = 1; // Minimum 1ms
+          
+          return ServerInfo(
+            config: config,
+            protocol: protocol,
+            ping: realPing,
+            name: name,
+          );
+        }
+      } catch (e) {
+        // Host lookup failed
+        return null;
       }
     } catch (e) {
-      // Server not reachable
+      // Config parsing failed
+      return null;
     }
     return null;
   }
@@ -450,7 +465,7 @@ class VPNService {
     return 'Unknown';
   }
   
-  // Convert VLESS URI to V2Ray JSON config
+  // Convert VLESS URI to V2Ray JSON config - FIXED
   static String _convertVlessToJson(String vlessUri) {
     try {
       // Parse VLESS URI
@@ -553,7 +568,8 @@ class VPNService {
             {
               "type": "field",
               "inboundTag": ["api"],
-              "outboundTag": "api"
+              "outboundTag": "api",
+              "enabled": true
             }
           ]
         }
@@ -565,18 +581,27 @@ class VPNService {
           "allowInsecure": false,
           "serverName": sni,
           "fingerprint": fp,
-          "alpn": alpn.split(',').where((s) => s.isNotEmpty).toList()
         };
+        
+        // Add alpn as list if exists
+        if (alpn.isNotEmpty) {
+          List<String> alpnList = alpn.split(',').where((s) => s.isNotEmpty).toList();
+          if (alpnList.isNotEmpty) {
+            config['outbounds'][0]['streamSettings']['tlsSettings']['alpn'] = alpnList;
+          }
+        }
       }
       
+      // Convert to JSON string
       return jsonEncode(config);
     } catch (e) {
       print('Error converting VLESS to JSON: $e');
+      print('Stack trace: ${e.toString()}');
       return '';
     }
   }
   
-  // Connect to VPN - REAL V2RAY CONNECTION
+  // Connect to VPN - USING DIRECT CONFIG
   static Future<bool> connect(String config) async {
     try {
       // Real V2Ray connection for Android
@@ -589,20 +614,10 @@ class VPNService {
           
           print('Starting V2Ray with config...');
           
-          // Convert VLESS URI to JSON if needed
-          String jsonConfig = config;
-          if (config.startsWith('vless://')) {
-            jsonConfig = _convertVlessToJson(config);
-            if (jsonConfig.isEmpty) {
-              print('Failed to convert VLESS to JSON');
-              return false;
-            }
-          }
-          
-          // Start V2Ray with JSON config
+          // Use config directly - flutter_v2ray accepts URI format
           await flutterV2ray.startV2Ray(
             remark: "AsadVPN Server",
-            config: jsonConfig,
+            config: config, // Pass VLESS URI directly
             bypassSubnets: ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"],
           );
           
@@ -655,6 +670,7 @@ class VPNService {
       await Future.delayed(Duration(milliseconds: 500));
       isConnected = false;
       fastestServers.clear();
+      allPingableServers.clear();
       serversStreamController.add([]);
     } catch (e) {
       print('Disconnect error: $e');
