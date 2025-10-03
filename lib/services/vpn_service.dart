@@ -103,9 +103,7 @@ class VPNService {
       ).timeout(Duration(seconds: 15));
       
       print('Response status: ${response.statusCode}');
-      print('Response headers: ${response.headers}');
       print('Response body length: ${response.body.length}');
-      print('First 200 chars: ${response.body.substring(0, response.body.length < 200 ? response.body.length : 200)}');
       
       if (response.statusCode == 200) {
         String content = response.body;
@@ -125,14 +123,38 @@ class VPNService {
           return false;
         }
         
-        // Parse ALL configs first
-        var allConfigs = content
+        // DECODE BASE64 if needed
+        String decodedContent = content;
+        try {
+          // Check if content is base64 encoded
+          if (!content.contains('://')) {
+            print('Content appears to be base64 encoded, decoding...');
+            decodedContent = utf8.decode(base64.decode(content.trim()));
+            print('Decoded successfully');
+          }
+        } catch (e) {
+          print('Not base64 or decode failed, using as-is');
+          decodedContent = content;
+        }
+        
+        // Parse ALL configs
+        var allConfigs = decodedContent
             .split('\n')
             .where((line) => line.trim().isNotEmpty)
             .where((line) => !line.startsWith('#'))
             .toList();
         
         print('Total configs found: ${allConfigs.length}');
+        
+        // Show first config for debug
+        if (allConfigs.isNotEmpty) {
+          String firstConfig = allConfigs.first;
+          if (firstConfig.length > 50) {
+            print('First config: ${firstConfig.substring(0, 50)}...');
+          } else {
+            print('First config: $firstConfig');
+          }
+        }
         
         // FILTER ONLY VLESS CONFIGS
         configServers = allConfigs
@@ -142,14 +164,13 @@ class VPNService {
         print('VLESS configs: ${configServers.length}');
         print('Other protocols: ${allConfigs.length - configServers.length}');
         
-        isSubscriptionValid = configServers.isNotEmpty;
-        
-        if (!isSubscriptionValid && allConfigs.isNotEmpty) {
-          print('WARNING: Found configs but no VLESS. Using all configs.');
+        // If no VLESS but has other configs, use them
+        if (configServers.isEmpty && allConfigs.isNotEmpty) {
+          print('WARNING: No VLESS configs found, using all configs');
           configServers = allConfigs;
-          isSubscriptionValid = true;
         }
         
+        isSubscriptionValid = configServers.isNotEmpty;
         return isSubscriptionValid;
       } else if (response.statusCode == 403) {
         print('ERROR: 403 Forbidden - Invalid subscription token');
@@ -422,9 +443,16 @@ class VPNService {
       // Real V2Ray connection for Android
       if (!kIsWeb && Platform.isAndroid) {
         try {
+          print('Requesting VPN permission...');
+          
+          // Request VPN permission first
+          await flutterV2ray.requestPermission();
+          
+          print('Starting V2Ray with config...');
+          
           // Start V2Ray with config
           await flutterV2ray.startV2Ray(
-            remark: "AsadVPN VLESS Server",
+            remark: "AsadVPN Server",
             config: config,
             bypassSubnets: ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"],
           );
