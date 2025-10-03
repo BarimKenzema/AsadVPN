@@ -17,7 +17,7 @@ dependencies:
   flutter_localizations:
     sdk: flutter
   mobile_scanner: ^3.0.0
-  hiddify: ^1.0.2
+  flutter_v2ray: ^1.0.10
 
 dev_dependencies:
   flutter_test:
