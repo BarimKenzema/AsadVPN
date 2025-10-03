@@ -62,7 +62,11 @@ class VPNService {
       
       // Initialize V2Ray
       if (!kIsWeb && Platform.isAndroid) {
-        await flutterV2ray.initializeV2Ray();
+        try {
+          await flutterV2ray.initializeV2Ray();
+        } catch (e) {
+          print('V2Ray init error (non-fatal): $e');
+        }
       }
       
       // Load saved subscription link
@@ -81,25 +85,43 @@ class VPNService {
   // Validate and fetch configs from subscription link - VLESS ONLY
   static Future<bool> validateSubscription() async {
     if (currentSubscriptionLink == null || currentSubscriptionLink!.isEmpty) {
+      print('validateSubscription: No subscription link');
       isSubscriptionValid = false;
       return false;
     }
     
     try {
-      print('Validating subscription: $currentSubscriptionLink');
+      print('=== VALIDATING SUBSCRIPTION ===');
+      print('URL: $currentSubscriptionLink');
       
       // Fetch configs from the subscription link
-      final response = await http.get(Uri.parse(currentSubscriptionLink!))
-          .timeout(Duration(seconds: 15));
+      final response = await http.get(
+        Uri.parse(currentSubscriptionLink!),
+        headers: {
+          'User-Agent': 'AsadVPN/1.0',
+        },
+      ).timeout(Duration(seconds: 15));
+      
+      print('Response status: ${response.statusCode}');
+      print('Response headers: ${response.headers}');
+      print('Response body length: ${response.body.length}');
+      print('First 200 chars: ${response.body.substring(0, response.body.length < 200 ? response.body.length : 200)}');
       
       if (response.statusCode == 200) {
         String content = response.body;
         
         // Check if subscription is expired
-        if (content.contains('SUBSCRIPTION_EXPIRED')) {
-          print('Subscription expired');
+        if (content.contains('SUBSCRIPTION_EXPIRED') || content.contains('expired')) {
+          print('Subscription expired detected');
           isSubscriptionValid = false;
           configServers = [];
+          return false;
+        }
+        
+        // Check if response is HTML (error page)
+        if (content.contains('<!DOCTYPE') || content.contains('<html')) {
+          print('ERROR: Received HTML instead of configs');
+          isSubscriptionValid = false;
           return false;
         }
         
@@ -110,28 +132,48 @@ class VPNService {
             .where((line) => !line.startsWith('#'))
             .toList();
         
+        print('Total configs found: ${allConfigs.length}');
+        
         // FILTER ONLY VLESS CONFIGS
         configServers = allConfigs
             .where((config) => config.toLowerCase().startsWith('vless://'))
             .toList();
         
-        print('Loaded ${configServers.length} VLESS servers (filtered from ${allConfigs.length} total)');
+        print('VLESS configs: ${configServers.length}');
+        print('Other protocols: ${allConfigs.length - configServers.length}');
+        
         isSubscriptionValid = configServers.isNotEmpty;
+        
+        if (!isSubscriptionValid && allConfigs.isNotEmpty) {
+          print('WARNING: Found configs but no VLESS. Using all configs.');
+          configServers = allConfigs;
+          isSubscriptionValid = true;
+        }
+        
         return isSubscriptionValid;
       } else if (response.statusCode == 403) {
-        print('Invalid subscription token');
+        print('ERROR: 403 Forbidden - Invalid subscription token');
+        isSubscriptionValid = false;
+        return false;
+      } else if (response.statusCode == 404) {
+        print('ERROR: 404 Not Found - Invalid URL');
+        isSubscriptionValid = false;
+        return false;
+      } else {
+        print('ERROR: Unexpected status code: ${response.statusCode}');
         isSubscriptionValid = false;
         return false;
       }
     } catch (e) {
-      print('Error validating subscription: $e');
+      print('ERROR validating subscription: $e');
+      print('Stack trace: ${e.toString()}');
       isSubscriptionValid = false;
     }
     
     return false;
   }
   
-  // Save subscription link - FIXED VALIDATION
+  // Save subscription link - WITH BETTER VALIDATION
   static Future<bool> saveSubscriptionLink(String link) async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -139,26 +181,59 @@ class VPNService {
       // Clean the link
       link = link.trim();
       
-      // Debug logging
-      print('=== SUBSCRIPTION DEBUG ===');
-      print('Received link: $link');
+      print('=== SAVING SUBSCRIPTION ===');
+      print('Original input: "$link"');
+      print('Length: ${link.length}');
       
-      // More flexible validation - just check if it's a pythonanywhere subscription
-      if (!link.contains('.pythonanywhere.com/sub/')) {
-        print('FAILED: Not a valid pythonanywhere subscription link');
+      // Remove any invisible characters
+      link = link.replaceAll(RegExp(r'[\u200B-\u200D\uFEFF]'), '');
+      print('After cleaning: "$link"');
+      
+      // Basic URL validation
+      if (!link.startsWith('http://') && !link.startsWith('https://')) {
+        print('ERROR: Link must start with http:// or https://');
         return false;
       }
       
-      print('Link validation passed');
+      // Check if it's a pythonanywhere subscription
+      if (!link.contains('pythonanywhere.com/sub/')) {
+        print('ERROR: Not a pythonanywhere subscription link');
+        print('Expected format: https://XXX.pythonanywhere.com/sub/TOKEN');
+        return false;
+      }
+      
+      // Extract and validate token
+      var parts = link.split('/sub/');
+      if (parts.length != 2 || parts[1].isEmpty) {
+        print('ERROR: Invalid subscription format - missing token');
+        return false;
+      }
+      
+      String token = parts[1].split('?')[0].split('#')[0]; // Remove any query params
+      print('Extracted token: $token');
+      
+      if (token.length < 10) {
+        print('ERROR: Token seems too short');
+        return false;
+      }
+      
+      print('Validation passed, saving...');
       currentSubscriptionLink = link;
       await prefs.setString('subscription_link', link);
       
-      // Validate the new subscription
+      // Now validate with the server
+      print('Fetching configs from server...');
       bool isValid = await validateSubscription();
-      print('Subscription validation result: $isValid');
+      
+      if (!isValid) {
+        print('Server validation failed - removing saved link');
+        await prefs.remove('subscription_link');
+        currentSubscriptionLink = null;
+      }
+      
       return isValid;
     } catch (e) {
-      print('Error saving subscription: $e');
+      print('ERROR saving subscription: $e');
       return false;
     }
   }
