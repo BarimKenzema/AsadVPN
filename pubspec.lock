@@ -94,11 +94,24 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.0.3"
+  flutter_localizations:
+    dependency: "direct main"
+    description: flutter
+    source: sdk
+    version: "0.0.0"
   flutter_test:
     dependency: "direct dev"
     description: flutter
     source: sdk
     version: "0.0.0"
+  flutter_v2ray:
+    dependency: "direct main"
+    description:
+      name: flutter_v2ray
+      sha256: "09dce3b4b58ea6a4220409d948a4d92a6eb3416184e6512ec0f5773fd48e5ab0"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.10"
   flutter_web_plugins:
     dependency: transitive
     description: flutter
@@ -120,6 +133,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "4.1.2"
+  intl:
+    dependency: "direct main"
+    description:
+      name: intl
+      sha256: "3df61194eb431efc39c4ceba583b95633a403f46c9fd341e550ce0bfa50e9aa5"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.20.2"
   leak_tracker:
     dependency: transitive
     description:
@@ -493,6 +514,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.1.5"
+  wireguard_vpn:
+    dependency: "direct main"
+    description:
+      name: wireguard_vpn
+      sha256: "84855e12a00090925b475351f432325f2fc0cbdb8da687dfe0baa1221be518eb"
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.0.2"
   xdg_directories:
     dependency: transitive
     description:

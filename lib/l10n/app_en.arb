@@ -1,0 +1,42 @@
+{
+  "appTitle": "AsadVPN",
+  "unlimited": "UNLIMITED",
+  "initializing": "Initializing...",
+  "checkingSubscription": "Checking subscription...",
+  "validatingSubscription": "Validating subscription...",
+  "readyToConnect": "Ready to connect",
+  "noSubscription": "No subscription",
+  "subscriptionExpired": "Subscription expired",
+  "invalidSubscription": "Invalid subscription",
+  "disconnecting": "Disconnecting...",
+  "disconnected": "Disconnected",
+  "connected": "Connected",
+  "connectionFailed": "Connection failed",
+  "noServersAvailable": "No servers available",
+  "scanningMessage": "A Moment Please...",
+  "enterSubscription": "Enter Subscription",
+  "subscriptionExpiredTitle": "Subscription Expired",
+  "enterSubscriptionMessage": "Enter your subscription link to activate AsadVPN:",
+  "subscriptionExpiredMessage": "Your subscription has expired. Please enter a new subscription link.",
+  "subscriptionLink": "Subscription Link",
+  "exampleLink": "Example: https://konabalan.pythonanywhere.com/sub/YOUR_TOKEN",
+  "getSubscription": "Get Subscription",
+  "activate": "Activate",
+  "changeSubscription": "Change Subscription",
+  "subscriptionActivated": "Subscription activated successfully!",
+  "invalidSubscriptionLink": "Invalid subscription link. Please check and try again.",
+  "serverList": "Server List",
+  "fastestServers": "Fastest Servers",
+  "protocol": "Protocol",
+  "ping": "Ping",
+  "selectServer": "Select Server",
+  "scanning": "Scanning",
+  "serversFound": "{count} servers found",
+  "@serversFound": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  }
+}
