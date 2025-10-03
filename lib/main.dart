@@ -1,4 +1,5 @@
 // lib/main.dart
+import 'qr_scanner_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
@@ -129,7 +130,7 @@ class _VPNHomePageState extends State<VPNHomePage> {
     }
   }
   
-  void _showSubscriptionDialog() {
+    void _showSubscriptionDialog() {
     final controller = TextEditingController();
     showDialog(
       context: context,
@@ -145,6 +146,25 @@ class _VPNHomePageState extends State<VPNHomePage> {
                 labelText: AppLocalizations.of(context)?.subscriptionLink ?? 'Subscription Link',
                 border: OutlineInputBorder(),
                 hintText: 'https://konabalan.pythonanywhere.com/sub/...',
+              ),
+            ),
+            SizedBox(height: 16),
+            // QR Code Scanner Button - THIS IS NEW
+            ElevatedButton.icon(
+              onPressed: () async {
+                final result = await Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => QRScannerPage()),
+                );
+                if (result != null) {
+                  controller.text = result;
+                }
+              },
+              icon: Icon(Icons.qr_code_scanner),
+              label: Text('Scan QR Code'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue,
+                minimumSize: Size(double.infinity, 45),
               ),
             ),
           ],
