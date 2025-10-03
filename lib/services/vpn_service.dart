@@ -131,7 +131,7 @@ class VPNService {
     return false;
   }
   
-  // Save subscription link
+  // Save subscription link - FIXED VALIDATION
   static Future<bool> saveSubscriptionLink(String link) async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -139,16 +139,23 @@ class VPNService {
       // Clean the link
       link = link.trim();
       
-      // Basic validation
-      if (!link.contains('konabalan.pythonanywhere.com/sub/')) {
+      // Debug logging
+      print('=== SUBSCRIPTION DEBUG ===');
+      print('Received link: $link');
+      
+      // More flexible validation - just check if it's a pythonanywhere subscription
+      if (!link.contains('.pythonanywhere.com/sub/')) {
+        print('FAILED: Not a valid pythonanywhere subscription link');
         return false;
       }
       
+      print('Link validation passed');
       currentSubscriptionLink = link;
       await prefs.setString('subscription_link', link);
       
       // Validate the new subscription
       bool isValid = await validateSubscription();
+      print('Subscription validation result: $isValid');
       return isValid;
     } catch (e) {
       print('Error saving subscription: $e');
