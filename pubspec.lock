@@ -610,14 +610,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.1.5"
-  wireguard_vpn:
-    dependency: "direct main"
-    description:
-      name: wireguard_vpn
-      sha256: "84855e12a00090925b475351f432325f2fc0cbdb8da687dfe0baa1221be518eb"
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.0.2"
   xdg_directories:
     dependency: transitive
     description:
