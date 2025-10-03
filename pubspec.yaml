@@ -16,8 +16,8 @@ dependencies:
   permission_handler: ^11.0.1
   flutter_localizations:
     sdk: flutter
-  flutter_v2ray: ^1.0.10
   mobile_scanner: ^3.0.0
+  hiddify: ^1.0.2
 
 dev_dependencies:
   flutter_test:
