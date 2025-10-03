@@ -110,59 +110,11 @@ abstract class AppLocalizations {
   /// **'UNLIMITED'**
   String get unlimited;
 
-  /// No description provided for @initializing.
+  /// No description provided for @connecting.
   ///
   /// In en, this message translates to:
-  /// **'Initializing...'**
-  String get initializing;
-
-  /// No description provided for @checkingSubscription.
-  ///
-  /// In en, this message translates to:
-  /// **'Checking subscription...'**
-  String get checkingSubscription;
-
-  /// No description provided for @validatingSubscription.
-  ///
-  /// In en, this message translates to:
-  /// **'Validating subscription...'**
-  String get validatingSubscription;
-
-  /// No description provided for @readyToConnect.
-  ///
-  /// In en, this message translates to:
-  /// **'Ready to connect'**
-  String get readyToConnect;
-
-  /// No description provided for @noSubscription.
-  ///
-  /// In en, this message translates to:
-  /// **'No subscription'**
-  String get noSubscription;
-
-  /// No description provided for @subscriptionExpired.
-  ///
-  /// In en, this message translates to:
-  /// **'Subscription expired'**
-  String get subscriptionExpired;
-
-  /// No description provided for @invalidSubscription.
-  ///
-  /// In en, this message translates to:
-  /// **'Invalid subscription'**
-  String get invalidSubscription;
-
-  /// No description provided for @disconnecting.
-  ///
-  /// In en, this message translates to:
-  /// **'Disconnecting...'**
-  String get disconnecting;
-
-  /// No description provided for @disconnected.
-  ///
-  /// In en, this message translates to:
-  /// **'Disconnected'**
-  String get disconnected;
+  /// **'A Moment Please...'**
+  String get connecting;
 
   /// No description provided for @connected.
   ///
@@ -170,23 +122,41 @@ abstract class AppLocalizations {
   /// **'Connected'**
   String get connected;
 
-  /// No description provided for @connectionFailed.
+  /// No description provided for @disconnected.
   ///
   /// In en, this message translates to:
-  /// **'Connection failed'**
-  String get connectionFailed;
+  /// **'Disconnected'**
+  String get disconnected;
 
-  /// No description provided for @noServersAvailable.
+  /// No description provided for @disconnect.
+  ///
+  /// In en, this message translates to:
+  /// **'Disconnect'**
+  String get disconnect;
+
+  /// No description provided for @connect.
+  ///
+  /// In en, this message translates to:
+  /// **'Connect'**
+  String get connect;
+
+  /// No description provided for @serverList.
+  ///
+  /// In en, this message translates to:
+  /// **'Server List'**
+  String get serverList;
+
+  /// No description provided for @noServers.
   ///
   /// In en, this message translates to:
   /// **'No servers available'**
-  String get noServersAvailable;
+  String get noServers;
 
-  /// No description provided for @scanningMessage.
+  /// No description provided for @scanningServers.
   ///
   /// In en, this message translates to:
-  /// **'A Moment Please...'**
-  String get scanningMessage;
+  /// **'Scanning servers...'**
+  String get scanningServers;
 
   /// No description provided for @enterSubscription.
   ///
@@ -194,41 +164,11 @@ abstract class AppLocalizations {
   /// **'Enter Subscription'**
   String get enterSubscription;
 
-  /// No description provided for @subscriptionExpiredTitle.
+  /// No description provided for @subscriptionExpired.
   ///
   /// In en, this message translates to:
   /// **'Subscription Expired'**
-  String get subscriptionExpiredTitle;
-
-  /// No description provided for @enterSubscriptionMessage.
-  ///
-  /// In en, this message translates to:
-  /// **'Enter your subscription link to activate AsadVPN:'**
-  String get enterSubscriptionMessage;
-
-  /// No description provided for @subscriptionExpiredMessage.
-  ///
-  /// In en, this message translates to:
-  /// **'Your subscription has expired. Please enter a new subscription link.'**
-  String get subscriptionExpiredMessage;
-
-  /// No description provided for @subscriptionLink.
-  ///
-  /// In en, this message translates to:
-  /// **'Subscription Link'**
-  String get subscriptionLink;
-
-  /// No description provided for @exampleLink.
-  ///
-  /// In en, this message translates to:
-  /// **'Example: https://konabalan.pythonanywhere.com/sub/YOUR_TOKEN'**
-  String get exampleLink;
-
-  /// No description provided for @getSubscription.
-  ///
-  /// In en, this message translates to:
-  /// **'Get Subscription'**
-  String get getSubscription;
+  String get subscriptionExpired;
 
   /// No description provided for @activate.
   ///
@@ -236,11 +176,29 @@ abstract class AppLocalizations {
   /// **'Activate'**
   String get activate;
 
+  /// No description provided for @getSubscription.
+  ///
+  /// In en, this message translates to:
+  /// **'Get Subscription'**
+  String get getSubscription;
+
   /// No description provided for @changeSubscription.
   ///
   /// In en, this message translates to:
   /// **'Change Subscription'**
   String get changeSubscription;
+
+  /// No description provided for @subscriptionLink.
+  ///
+  /// In en, this message translates to:
+  /// **'Subscription Link'**
+  String get subscriptionLink;
+
+  /// No description provided for @invalidSubscription.
+  ///
+  /// In en, this message translates to:
+  /// **'Invalid subscription link'**
+  String get invalidSubscription;
 
   /// No description provided for @subscriptionActivated.
   ///
@@ -248,17 +206,11 @@ abstract class AppLocalizations {
   /// **'Subscription activated successfully!'**
   String get subscriptionActivated;
 
-  /// No description provided for @invalidSubscriptionLink.
+  /// No description provided for @selectServer.
   ///
   /// In en, this message translates to:
-  /// **'Invalid subscription link. Please check and try again.'**
-  String get invalidSubscriptionLink;
-
-  /// No description provided for @serverList.
-  ///
-  /// In en, this message translates to:
-  /// **'Server List'**
-  String get serverList;
+  /// **'Select Server'**
+  String get selectServer;
 
   /// No description provided for @fastestServers.
   ///
@@ -277,24 +229,6 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Ping'**
   String get ping;
-
-  /// No description provided for @selectServer.
-  ///
-  /// In en, this message translates to:
-  /// **'Select Server'**
-  String get selectServer;
-
-  /// No description provided for @scanning.
-  ///
-  /// In en, this message translates to:
-  /// **'Scanning'**
-  String get scanning;
-
-  /// No description provided for @serversFound.
-  ///
-  /// In en, this message translates to:
-  /// **'{count} servers found'**
-  String serversFound(int count);
 }
 
 class _AppLocalizationsDelegate

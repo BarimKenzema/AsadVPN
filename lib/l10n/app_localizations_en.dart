@@ -15,83 +15,55 @@ class AppLocalizationsEn extends AppLocalizations {
   String get unlimited => 'UNLIMITED';
 
   @override
-  String get initializing => 'Initializing...';
-
-  @override
-  String get checkingSubscription => 'Checking subscription...';
-
-  @override
-  String get validatingSubscription => 'Validating subscription...';
-
-  @override
-  String get readyToConnect => 'Ready to connect';
-
-  @override
-  String get noSubscription => 'No subscription';
-
-  @override
-  String get subscriptionExpired => 'Subscription expired';
-
-  @override
-  String get invalidSubscription => 'Invalid subscription';
-
-  @override
-  String get disconnecting => 'Disconnecting...';
-
-  @override
-  String get disconnected => 'Disconnected';
+  String get connecting => 'A Moment Please...';
 
   @override
   String get connected => 'Connected';
 
   @override
-  String get connectionFailed => 'Connection failed';
+  String get disconnected => 'Disconnected';
 
   @override
-  String get noServersAvailable => 'No servers available';
+  String get disconnect => 'Disconnect';
 
   @override
-  String get scanningMessage => 'A Moment Please...';
+  String get connect => 'Connect';
+
+  @override
+  String get serverList => 'Server List';
+
+  @override
+  String get noServers => 'No servers available';
+
+  @override
+  String get scanningServers => 'Scanning servers...';
 
   @override
   String get enterSubscription => 'Enter Subscription';
 
   @override
-  String get subscriptionExpiredTitle => 'Subscription Expired';
-
-  @override
-  String get enterSubscriptionMessage =>
-      'Enter your subscription link to activate AsadVPN:';
-
-  @override
-  String get subscriptionExpiredMessage =>
-      'Your subscription has expired. Please enter a new subscription link.';
-
-  @override
-  String get subscriptionLink => 'Subscription Link';
-
-  @override
-  String get exampleLink =>
-      'Example: https://konabalan.pythonanywhere.com/sub/YOUR_TOKEN';
-
-  @override
-  String get getSubscription => 'Get Subscription';
+  String get subscriptionExpired => 'Subscription Expired';
 
   @override
   String get activate => 'Activate';
 
   @override
+  String get getSubscription => 'Get Subscription';
+
+  @override
   String get changeSubscription => 'Change Subscription';
+
+  @override
+  String get subscriptionLink => 'Subscription Link';
+
+  @override
+  String get invalidSubscription => 'Invalid subscription link';
 
   @override
   String get subscriptionActivated => 'Subscription activated successfully!';
 
   @override
-  String get invalidSubscriptionLink =>
-      'Invalid subscription link. Please check and try again.';
-
-  @override
-  String get serverList => 'Server List';
+  String get selectServer => 'Select Server';
 
   @override
   String get fastestServers => 'Fastest Servers';
@@ -101,15 +73,4 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get ping => 'Ping';
-
-  @override
-  String get selectServer => 'Select Server';
-
-  @override
-  String get scanning => 'Scanning';
-
-  @override
-  String serversFound(int count) {
-    return '$count servers found';
-  }
 }

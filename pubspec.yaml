@@ -17,7 +17,7 @@ dependencies:
   flutter_localizations:
     sdk: flutter
   flutter_v2ray: ^1.0.10
-  mobile_scanner: ^3.5.0
+  mobile_scanner: ^3.0.0
 
 dev_dependencies:
   flutter_test:

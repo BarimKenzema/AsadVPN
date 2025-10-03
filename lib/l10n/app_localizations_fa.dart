@@ -15,83 +15,55 @@ class AppLocalizationsFa extends AppLocalizations {
   String get unlimited => 'نامحدود';
 
   @override
-  String get initializing => 'در حال آماده‌سازی...';
-
-  @override
-  String get checkingSubscription => 'بررسی اشتراک...';
-
-  @override
-  String get validatingSubscription => 'اعتبارسنجی اشتراک...';
-
-  @override
-  String get readyToConnect => 'آماده اتصال';
-
-  @override
-  String get noSubscription => 'بدون اشتراک';
-
-  @override
-  String get subscriptionExpired => 'اشتراک منقضی شده';
-
-  @override
-  String get invalidSubscription => 'اشتراک نامعتبر';
-
-  @override
-  String get disconnecting => 'در حال قطع اتصال...';
-
-  @override
-  String get disconnected => 'قطعه';
+  String get connecting => 'A Moment Please...';
 
   @override
   String get connected => 'متصل';
 
   @override
-  String get connectionFailed => 'اتصال ناموفق';
+  String get disconnected => 'قطعه';
 
   @override
-  String get noServersAvailable => 'سروری در دسترس نیست';
+  String get disconnect => 'Disconnect';
 
   @override
-  String get scanningMessage => 'لطفاً کمی صبر کنید...';
+  String get connect => 'Connect';
+
+  @override
+  String get serverList => 'لیست سرورها';
+
+  @override
+  String get noServers => 'No servers available';
+
+  @override
+  String get scanningServers => 'Scanning servers...';
 
   @override
   String get enterSubscription => 'وارد کردن اشتراک';
 
   @override
-  String get subscriptionExpiredTitle => 'اشتراک منقضی شده';
-
-  @override
-  String get enterSubscriptionMessage =>
-      'لینک اشتراک خود را برای فعال‌سازی وارد کنید:';
-
-  @override
-  String get subscriptionExpiredMessage =>
-      'اشتراک شما منقضی شده است. لطفاً لینک اشتراک جدید وارد کنید.';
-
-  @override
-  String get subscriptionLink => 'لینک اشتراک';
-
-  @override
-  String get exampleLink =>
-      'مثال: https://konabalan.pythonanywhere.com/sub/YOUR_TOKEN';
-
-  @override
-  String get getSubscription => 'دریافت اشتراک';
+  String get subscriptionExpired => 'اشتراک منقضی شده';
 
   @override
   String get activate => 'فعال‌سازی';
 
   @override
+  String get getSubscription => 'دریافت اشتراک';
+
+  @override
   String get changeSubscription => 'تغییر اشتراک';
+
+  @override
+  String get subscriptionLink => 'لینک اشتراک';
+
+  @override
+  String get invalidSubscription => 'اشتراک نامعتبر';
 
   @override
   String get subscriptionActivated => 'اشتراک با موفقیت فعال شد!';
 
   @override
-  String get invalidSubscriptionLink =>
-      'لینک اشتراک نامعتبر است. لطفاً بررسی کرده و دوباره امتحان کنید.';
-
-  @override
-  String get serverList => 'لیست سرورها';
+  String get selectServer => 'انتخاب سرور';
 
   @override
   String get fastestServers => 'سریع‌ترین سرورها';
@@ -101,15 +73,4 @@ class AppLocalizationsFa extends AppLocalizations {
 
   @override
   String get ping => 'پینگ';
-
-  @override
-  String get selectServer => 'انتخاب سرور';
-
-  @override
-  String get scanning => 'در حال اسکن';
-
-  @override
-  String serversFound(int count) {
-    return '$count سرور یافت شد';
-  }
 }
