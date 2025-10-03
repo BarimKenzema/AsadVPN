@@ -4,6 +4,9 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.CAMERA"/>
+    <!-- VPN permissions for flutter_v2ray -->
+    <uses-permission android:name="android.permission.BIND_VPN_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_VPN"/>
     
     <application
         android:label="AsadVPN"
@@ -26,6 +29,17 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        
+        <!-- CRITICAL: V2Ray VPN Service declaration -->
+        <service
+            android:name="com.github.dawndiy.flutter_v2ray.V2RayVpnService"
+            android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService"/>
+            </intent-filter>
+        </service>
+        
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
