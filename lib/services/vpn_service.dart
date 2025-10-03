@@ -366,6 +366,13 @@ class VPNService {
       String protocol = _getProtocol(config);
       String name = _extractServerName(config);
       
+      // URL decode the name
+      try {
+        name = Uri.decodeComponent(name);
+      } catch (e) {
+        // Keep original if decode fails
+      }
+      
       if (kIsWeb) {
         // Simulate ping for web
         return ServerInfo(
@@ -420,7 +427,13 @@ class VPNService {
   static String _extractServerName(String config) {
     try {
       if (config.contains('#')) {
-        return config.split('#').last;
+        String name = config.split('#').last;
+        // URL decode the name
+        try {
+          return Uri.decodeComponent(name);
+        } catch (e) {
+          return name;
+        }
       }
       return _extractHost(config);
     } catch (e) {
@@ -437,6 +450,132 @@ class VPNService {
     return 'Unknown';
   }
   
+  // Convert VLESS URI to V2Ray JSON config
+  static String _convertVlessToJson(String vlessUri) {
+    try {
+      // Parse VLESS URI
+      Uri uri = Uri.parse(vlessUri);
+      String uuid = uri.userInfo;
+      String host = uri.host;
+      int port = uri.port;
+      
+      // Extract parameters
+      String security = uri.queryParameters['security'] ?? 'none';
+      String type = uri.queryParameters['type'] ?? 'tcp';
+      String sni = uri.queryParameters['sni'] ?? host;
+      String fp = uri.queryParameters['fp'] ?? 'chrome';
+      String alpn = uri.queryParameters['alpn'] ?? '';
+      
+      // Create V2Ray JSON config
+      Map<String, dynamic> config = {
+        "policy": {
+          "system": {
+            "statsOutboundUplink": true,
+            "statsOutboundDownlink": true
+          }
+        },
+        "log": {
+          "access": "",
+          "error": "",
+          "loglevel": "warning"
+        },
+        "inbounds": [
+          {
+            "tag": "socks",
+            "port": 10808,
+            "protocol": "socks",
+            "settings": {
+              "auth": "noauth",
+              "udp": true,
+              "userLevel": 8
+            },
+            "sniffing": {
+              "destOverride": ["http", "tls"],
+              "enabled": true
+            }
+          },
+          {
+            "tag": "http",
+            "port": 10809,
+            "protocol": "http",
+            "settings": {
+              "userLevel": 8
+            }
+          }
+        ],
+        "outbounds": [
+          {
+            "tag": "proxy",
+            "protocol": "vless",
+            "settings": {
+              "vnext": [
+                {
+                  "address": host,
+                  "port": port,
+                  "users": [
+                    {
+                      "id": uuid,
+                      "alterId": 0,
+                      "email": "t@t.tt",
+                      "encryption": "none"
+                    }
+                  ]
+                }
+              ]
+            },
+            "streamSettings": {
+              "network": type,
+              "security": security,
+            },
+            "mux": {
+              "enabled": false,
+              "concurrency": -1
+            }
+          },
+          {
+            "tag": "direct",
+            "protocol": "freedom",
+            "settings": {}
+          },
+          {
+            "tag": "block",
+            "protocol": "blackhole",
+            "settings": {
+              "response": {
+                "type": "http"
+              }
+            }
+          }
+        ],
+        "routing": {
+          "domainStrategy": "AsIs",
+          "rules": [
+            {
+              "type": "field",
+              "inboundTag": ["api"],
+              "outboundTag": "api"
+            }
+          ]
+        }
+      };
+      
+      // Add TLS settings if needed
+      if (security == 'tls') {
+        config['outbounds'][0]['streamSettings']['tlsSettings'] = {
+          "allowInsecure": false,
+          "serverName": sni,
+          "fingerprint": fp,
+          "alpn": alpn.split(',').where((s) => s.isNotEmpty).toList()
+        };
+      }
+      
+      return jsonEncode(config);
+    } catch (e) {
+      print('Error converting VLESS to JSON: $e');
+      return '';
+    }
+  }
+  
   // Connect to VPN - REAL V2RAY CONNECTION
   static Future<bool> connect(String config) async {
     try {
@@ -450,10 +589,20 @@ class VPNService {
           
           print('Starting V2Ray with config...');
           
-          // Start V2Ray with config
+          // Convert VLESS URI to JSON if needed
+          String jsonConfig = config;
+          if (config.startsWith('vless://')) {
+            jsonConfig = _convertVlessToJson(config);
+            if (jsonConfig.isEmpty) {
+              print('Failed to convert VLESS to JSON');
+              return false;
+            }
+          }
+          
+          // Start V2Ray with JSON config
           await flutterV2ray.startV2Ray(
             remark: "AsadVPN Server",
-            config: config,
+            config: jsonConfig,
             bypassSubnets: ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"],
           );
           
