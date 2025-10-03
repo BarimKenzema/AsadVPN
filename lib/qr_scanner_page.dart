@@ -30,7 +30,7 @@ class _QRScannerPageState extends State<QRScannerPage> {
                     final String code = barcode.rawValue!;
                     
                     // Check if it's a valid subscription link
-                    if (code.contains('pythonanywhere.com/sub/')) {
+                    if (code.contains('konabalan.pythonanywhere.com/sub/')) {
                       Navigator.pop(context, code);
                     } else {
                       // Show error and continue scanning

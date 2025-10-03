@@ -140,7 +140,7 @@ class VPNService {
       link = link.trim();
       
       // Basic validation
-      if (!link.contains('pythonanywhere.com/sub/')) {
+      if (!link.contains('konabalan.pythonanywhere.com/sub/')) {
         return false;
       }
       
