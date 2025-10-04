@@ -4,7 +4,6 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.CAMERA"/>
-    <!-- VPN permissions for flutter_v2ray -->
     <uses-permission android:name="android.permission.BIND_VPN_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_VPN"/>
     
@@ -30,11 +29,21 @@
             </intent-filter>
         </activity>
         
-        <!-- CRITICAL: V2Ray VPN Service declaration -->
+        <!-- V2Ray VPN Service for flutter_v2ray -->
         <service
             android:name="com.github.dawndiy.flutter_v2ray.V2RayVpnService"
             android:exported="false"
             android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService"/>
+            </intent-filter>
+        </service>
+        
+        <!-- Native VPN Service (ONLY for native approach) -->
+        <service
+            android:name=".SingBoxVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false">
             <intent-filter>
                 <action android:name="android.net.VpnService"/>
             </intent-filter>
