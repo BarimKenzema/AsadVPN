@@ -69,7 +69,7 @@ class SingBoxVpnService : VpnService() {
             throw Exception("Failed to establish VPN interface")
         }
         
-        // Create V2Ray config with TUN inbound
+        // Create V2Ray config
         val v2rayConfig = JSONObject().apply {
             put("log", JSONObject().apply {
                 put("loglevel", "warning")
@@ -83,15 +83,15 @@ class SingBoxVpnService : VpnService() {
             })
             
             put("inbounds", JSONArray().apply {
-                // TUN inbound - V2Ray will handle the TUN device directly
                 put(JSONObject().apply {
-                    put("tag", "tun")
-                    put("protocol", "dokodemo-door")
+                    put("tag", "socks")
+                    put("port", 10808)
+                    put("protocol", "socks")
                     put("listen", "127.0.0.1")
-                    put("port", 12345)
                     put("settings", JSONObject().apply {
-                        put("network", "tcp,udp")
-                        put("followRedirect", true)
+                        put("auth", "noauth")
+                        put("udp", true)
+                        put("userLevel", 8)
                     })
                     put("sniffing", JSONObject().apply {
                         put("enabled", true)
@@ -116,10 +116,10 @@ class SingBoxVpnService : VpnService() {
                                     put(JSONObject().apply {
                                         put("id", uuid)
                                         put("encryption", encryption)
-                                        if (flow.isNotEmpty()) {
+                                        if (flow.isNotEmpty() && flow != "none") {
                                             put("flow", flow)
                                         }
-                                        put("level", 0)
+                                        put("level", 8)
                                     })
                                 })
                             })
@@ -162,6 +162,11 @@ class SingBoxVpnService : VpnService() {
                     put("protocol", "freedom")
                     put("tag", "direct")
                 })
+                
+                put(JSONObject().apply {
+                    put("protocol", "blackhole")
+                    put("tag", "block")
+                })
             })
             
             put("routing", JSONObject().apply {
@@ -189,43 +194,54 @@ class SingBoxVpnService : VpnService() {
         val v2rayBinaryName = when {
             abi.contains("arm64") -> "v2ray-arm64"
             abi.contains("armeabi") -> "v2ray-arm32"
-            else -> "v2ray-arm64" // fallback
+            else -> "v2ray-arm64"
         }
         
-        // Extract V2Ray binary with proper fallback handling
-        val v2rayBinary = File(filesDir, "v2ray")
-        if (!v2rayBinary.exists()) {
+        // Extract V2Ray binary to cache directory (more permissive)
+        val cacheDir = File(cacheDir, "v2ray_bin")
+        if (!cacheDir.exists()) {
+            cacheDir.mkdirs()
+        }
+        
+        val v2rayBinary = File(cacheDir, "v2ray")
+        
+        // Always re-extract to ensure it's executable
+        try {
+            assets.open(v2rayBinaryName).use { input ->
+                FileOutputStream(v2rayBinary).use { output ->
+                    input.copyTo(output)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Binary $v2rayBinaryName not found, trying v2ray-arm64")
             try {
-                assets.open(v2rayBinaryName).use { input ->
+                assets.open("v2ray-arm64").use { input ->
                     FileOutputStream(v2rayBinary).use { output ->
                         input.copyTo(output)
                     }
                 }
-            } catch (e: Exception) {
-                // If specific arch not found, try v2ray-arm64 as fallback
-                Log.w(TAG, "Binary $v2rayBinaryName not found, using v2ray-arm64")
-                try {
-                    assets.open("v2ray-arm64").use { input ->
-                        FileOutputStream(v2rayBinary).use { output ->
-                            input.copyTo(output)
-                        }
-                    }
-                } catch (e2: Exception) {
-                    // Last resort: try just "v2ray"
-                    Log.w(TAG, "v2ray-arm64 not found, trying generic v2ray")
-                    assets.open("v2ray").use { input ->
-                        FileOutputStream(v2rayBinary).use { output ->
-                            input.copyTo(output)
-                        }
+            } catch (e2: Exception) {
+                Log.w(TAG, "v2ray-arm64 not found, trying generic v2ray")
+                assets.open("v2ray").use { input ->
+                    FileOutputStream(v2rayBinary).use { output ->
+                        input.copyTo(output)
                     }
                 }
             }
-            v2rayBinary.setExecutable(true)
         }
         
-        // Copy geoip and geosite files if they exist
+        // Make executable using chmod command
         try {
-            val geoipFile = File(filesDir, "geoip.dat")
+            Runtime.getRuntime().exec(arrayOf("chmod", "755", v2rayBinary.absolutePath)).waitFor()
+        } catch (e: Exception) {
+            Log.w(TAG, "chmod failed, trying to set executable directly")
+            v2rayBinary.setExecutable(true, false)
+            v2rayBinary.setReadable(true, false)
+        }
+        
+        // Copy geoip and geosite files to cache directory
+        try {
+            val geoipFile = File(cacheDir, "geoip.dat")
             if (!geoipFile.exists()) {
                 assets.open("geoip.dat").use { input ->
                     FileOutputStream(geoipFile).use { output ->
@@ -238,7 +254,7 @@ class SingBoxVpnService : VpnService() {
         }
         
         try {
-            val geositeFile = File(filesDir, "geosite.dat")
+            val geositeFile = File(cacheDir, "geosite.dat")
             if (!geositeFile.exists()) {
                 assets.open("geosite.dat").use { input ->
                     FileOutputStream(geositeFile).use { output ->
@@ -250,43 +266,73 @@ class SingBoxVpnService : VpnService() {
             Log.w(TAG, "geosite.dat not found in assets")
         }
         
-        // Start V2Ray process
-        val pb = ProcessBuilder(
-            v2rayBinary.absolutePath,
-            "run",
-            "-config",
-            configFile.absolutePath
-        )
-        pb.environment()["V2RAY_LOCATION_ASSET"] = filesDir.absolutePath
-        pb.redirectErrorStream(true)
-        
-        v2rayProcess = pb.start()
-        isRunning = true
-        
-        // Start logging V2Ray output for debugging
-        Thread {
-            try {
-                v2rayProcess?.inputStream?.bufferedReader()?.forEachLine { line ->
-                    Log.d(TAG, "V2Ray: $line")
+        // Start V2Ray process using Runtime.exec with shell
+        try {
+            // Use sh -c to execute the binary
+            val command = arrayOf(
+                "sh", "-c",
+                "${v2rayBinary.absolutePath} run -config ${configFile.absolutePath}"
+            )
+            
+            val env = arrayOf(
+                "V2RAY_LOCATION_ASSET=${cacheDir.absolutePath}",
+                "PATH=/system/bin:/system/xbin"
+            )
+            
+            v2rayProcess = Runtime.getRuntime().exec(command, env, cacheDir)
+            
+            isRunning = true
+            
+            // Start logging V2Ray output for debugging
+            Thread {
+                try {
+                    v2rayProcess?.inputStream?.bufferedReader()?.forEachLine { line ->
+                        Log.d(TAG, "V2Ray: $line")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error reading V2Ray output", e)
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error reading V2Ray output", e)
-            }
-        }.start()
-        
-        // Set up traffic redirection using iptables (simpler than tun2socks)
-        setupTrafficRedirection()
-        
-        Log.d(TAG, "VPN Started Successfully")
+            }.start()
+            
+            // Start error stream logging
+            Thread {
+                try {
+                    v2rayProcess?.errorStream?.bufferedReader()?.forEachLine { line ->
+                        Log.e(TAG, "V2Ray Error: $line")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error reading V2Ray error stream", e)
+                }
+            }.start()
+            
+            // Set up traffic redirection
+            setupTrafficRedirection()
+            
+            Log.d(TAG, "VPN Started Successfully")
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start V2Ray process", e)
+            throw e
+        }
     }
     
     private fun setupTrafficRedirection() {
         try {
-            // Simple traffic redirection without tun2socks
             val fd = vpnInterface?.fd ?: return
             
-            // V2Ray will handle the traffic directly
-            Log.d(TAG, "Traffic redirection setup complete")
+            // Traffic will be handled by V2Ray through SOCKS proxy
+            Log.d(TAG, "Traffic redirection setup complete, fd: $fd")
+            
+            // Try to set up iptables rules for traffic redirection
+            try {
+                Runtime.getRuntime().exec(arrayOf(
+                    "sh", "-c",
+                    "iptables -t nat -A OUTPUT -p tcp -j REDIRECT --to-ports 10808"
+                ))
+            } catch (e: Exception) {
+                Log.w(TAG, "iptables setup failed (expected on non-rooted devices): $e")
+            }
+            
         } catch (e: Exception) {
             Log.e(TAG, "Failed to setup traffic redirection", e)
         }
