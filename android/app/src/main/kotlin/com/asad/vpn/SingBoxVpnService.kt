@@ -56,7 +56,7 @@ class SingBoxVpnService : VpnService() {
         val builder = Builder()
         builder.setSession("AsadVPN")
             .setMtu(1500)
-            .addAddress("10.0.0.2", 24)
+            .addAddress("172.19.0.1", 30)
             .addRoute("0.0.0.0", 0)
             .addDnsServer("8.8.8.8")
             .addDnsServer("1.1.1.1")
@@ -71,147 +71,153 @@ class SingBoxVpnService : VpnService() {
         val vpnFd = vpnInterface!!.fd
         Log.d(TAG, "VPN interface established, FD: $vpnFd")
         
-        // Create V2Ray config for libv2ray
-        // This format is specific to AndroidLibV2rayLite
-        val v2rayConfig = JSONObject().apply {
-            put("dns", JSONObject().apply {
-                put("hosts", JSONObject().apply {
-                    put("domain:googleapis.cn", "googleapis.com")
-                })
-                put("servers", JSONArray().apply {
-                    put("1.1.1.1")
-                    put("8.8.8.8")
-                })
-            })
-            
+        // Create sing-box config (simpler than V2Ray)
+        val singBoxConfig = JSONObject().apply {
+            // Log settings
             put("log", JSONObject().apply {
-                put("loglevel", "warning")
+                put("level", "info")
+                put("timestamp", true)
             })
             
-            put("routing", JSONObject().apply {
-                put("domainStrategy", "IPIfNonMatch")
-                put("rules", JSONArray().apply {
-                    // Add basic routing rules
+            // DNS settings
+            put("dns", JSONObject().apply {
+                put("servers", JSONArray().apply {
                     put(JSONObject().apply {
-                        put("type", "field")
-                        put("ip", JSONArray().apply {
-                            put("geoip:private")
-                        })
-                        put("outboundTag", "direct")
+                        put("tag", "google")
+                        put("address", "8.8.8.8")
+                    })
+                    put(JSONObject().apply {
+                        put("tag", "local")
+                        put("address", "223.5.5.5")
+                        put("detour", "direct")
                     })
                 })
+                put("rules", JSONArray())
+                put("final", "google")
             })
             
+            // Inbound - TUN device
             put("inbounds", JSONArray().apply {
-                // Socks inbound for local apps
                 put(JSONObject().apply {
-                    put("tag", "socks")
-                    put("port", 10808)
-                    put("listen", "127.0.0.1")
-                    put("protocol", "socks")
-                    put("settings", JSONObject().apply {
-                        put("auth", "noauth")
-                        put("udp", true)
-                        put("userLevel", 8)
-                    })
-                    put("sniffing", JSONObject().apply {
-                        put("enabled", true)
-                        put("destOverride", JSONArray().apply {
-                            put("http")
-                            put("tls")
-                        })
-                    })
+                    put("type", "tun")
+                    put("tag", "tun-in")
+                    put("inet4_address", "172.19.0.1/30")
+                    put("auto_route", true)
+                    put("strict_route", false)
+                    put("stack", "gvisor")
+                    put("sniff", true)
                 })
             })
             
+            // Outbound - VLESS server
             put("outbounds", JSONArray().apply {
-                // VLESS outbound
+                // Main VLESS outbound
                 put(JSONObject().apply {
+                    put("type", "vless")
                     put("tag", "proxy")
-                    put("protocol", "vless")
-                    put("settings", JSONObject().apply {
-                        put("vnext", JSONArray().apply {
-                            put(JSONObject().apply {
-                                put("address", host)
-                                put("port", port)
-                                put("users", JSONArray().apply {
-                                    put(JSONObject().apply {
-                                        put("id", uuid)
-                                        put("encryption", encryption)
-                                        put("level", 8)
-                                        if (flow.isNotEmpty() && flow != "none") {
-                                            put("flow", flow)
-                                        }
-                                    })
-                                })
+                    put("server", host)
+                    put("server_port", port)
+                    put("uuid", uuid)
+                    
+                    // Flow settings
+                    if (flow.isNotEmpty() && flow != "none") {
+                        put("flow", flow)
+                    }
+                    
+                    // TLS settings
+                    if (security == "tls") {
+                        put("tls", JSONObject().apply {
+                            put("enabled", true)
+                            put("server_name", sni)
+                            put("insecure", true)
+                            put("alpn", JSONArray().apply {
+                                put("h2")
+                                put("http/1.1")
                             })
                         })
-                    })
-                    put("streamSettings", JSONObject().apply {
-                        put("network", type)
-                        put("security", security)
-                        
-                        if (security == "tls") {
-                            put("tlsSettings", JSONObject().apply {
-                                put("serverName", sni)
-                                put("allowInsecure", true)
-                                put("alpn", JSONArray().apply {
-                                    put("h2")
-                                    put("http/1.1")
-                                })
-                            })
-                        }
-                        
-                        if (type == "ws") {
-                            put("wsSettings", JSONObject().apply {
+                    }
+                    
+                    // Transport settings
+                    put("transport", JSONObject().apply {
+                        when (type) {
+                            "ws" -> {
+                                put("type", "ws")
                                 put("path", params["path"] ?: "/")
-                                put("headers", JSONObject().apply {
-                                    put("Host", params["host"] ?: host)
-                                })
-                            })
-                        }
-                        
-                        if (type == "grpc") {
-                            put("grpcSettings", JSONObject().apply {
-                                put("serviceName", params["serviceName"] ?: "")
-                                put("multiMode", false)
-                            })
+                                params["host"]?.let { wsHost ->
+                                    put("headers", JSONObject().apply {
+                                        put("Host", wsHost)
+                                    })
+                                }
+                            }
+                            "grpc" -> {
+                                put("type", "grpc")
+                                put("service_name", params["serviceName"] ?: "")
+                            }
+                            "http" -> {
+                                put("type", "http")
+                                params["host"]?.let { httpHost ->
+                                    put("host", JSONArray().apply {
+                                        put(httpHost)
+                                    })
+                                }
+                                params["path"]?.let { httpPath ->
+                                    put("path", httpPath)
+                                }
+                            }
                         }
                     })
                 })
                 
                 // Direct outbound
                 put(JSONObject().apply {
+                    put("type", "direct")
                     put("tag", "direct")
-                    put("protocol", "freedom")
-                    put("settings", JSONObject())
                 })
                 
                 // Block outbound
                 put(JSONObject().apply {
+                    put("type", "block")
                     put("tag", "block")
-                    put("protocol", "blackhole")
-                    put("settings", JSONObject().apply {
-                        put("response", JSONObject().apply {
-                            put("type", "http")
+                })
+            })
+            
+            // Routing rules
+            put("route", JSONObject().apply {
+                put("auto_detect_interface", true)
+                put("rules", JSONArray().apply {
+                    // Private IPs go direct
+                    put(JSONObject().apply {
+                        put("ip_cidr", JSONArray().apply {
+                            put("224.0.0.0/3")
+                            put("ff00::/8")
                         })
+                        put("outbound", "block")
+                    })
+                    put(JSONObject().apply {
+                        put("ip_cidr", JSONArray().apply {
+                            put("10.0.0.0/8")
+                            put("172.16.0.0/12")
+                            put("192.168.0.0/16")
+                        })
+                        put("outbound", "direct")
                     })
                 })
+                put("final", "proxy")
             })
         }
         
-        val configJson = v2rayConfig.toString(2)
-        Log.d(TAG, "V2Ray config generated, length: ${configJson.length}")
+        val configJson = singBoxConfig.toString(2)
+        Log.d(TAG, "Sing-box config generated, length: ${configJson.length}")
         
-        // Start V2Ray using native library with VPN file descriptor
-        val success = V2RayWrapper.startV2Ray(vpnFd, configJson)
+        // Start service using Leaf/SingBox library
+        val success = LeafWrapper.start(configJson)
         
         if (success) {
-            Log.d(TAG, "V2Ray started successfully via native library")
+            Log.d(TAG, "Leaf/SingBox started successfully")
             isRunning = true
             SingBoxVpnService.isRunning = true
         } else {
-            throw Exception("Failed to start V2Ray via native library")
+            throw Exception("Failed to start Leaf/SingBox service")
         }
     }
     
@@ -220,8 +226,8 @@ class SingBoxVpnService : VpnService() {
             isRunning = false
             SingBoxVpnService.isRunning = false
             
-            // Stop V2Ray via native library
-            V2RayWrapper.stopV2Ray()
+            // Stop Leaf/SingBox service
+            LeafWrapper.stop()
             
             vpnInterface?.close()
             vpnInterface = null
