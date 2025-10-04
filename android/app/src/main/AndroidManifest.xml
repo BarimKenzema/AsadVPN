@@ -29,17 +29,7 @@
             </intent-filter>
         </activity>
         
-        <!-- V2Ray VPN Service for flutter_v2ray -->
-        <service
-            android:name="com.github.dawndiy.flutter_v2ray.V2RayVpnService"
-            android:exported="false"
-            android:permission="android.permission.BIND_VPN_SERVICE">
-            <intent-filter>
-                <action android:name="android.net.VpnService"/>
-            </intent-filter>
-        </service>
-        
-        <!-- Native VPN Service (ONLY for native approach) -->
+        <!-- NATIVE VPN Service - THIS IS CRITICAL -->
         <service
             android:name=".SingBoxVpnService"
             android:permission="android.permission.BIND_VPN_SERVICE"
