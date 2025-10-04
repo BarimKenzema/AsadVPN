@@ -8,16 +8,15 @@ object V2RayWrapper {
     
     init {
         try {
-            System.loadLibrary("v2ray")
+            System.loadLibrary("gojni")  // CHANGED: was "v2ray", now "gojni"
             initialized = true
-            Log.d(TAG, "V2Ray library loaded successfully")
+            Log.d(TAG, "V2Ray (gojni) library loaded successfully")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load V2Ray library", e)
         }
     }
     
-    // These are the actual JNI methods from libv2ray
-    // Based on AndroidLibV2rayLite implementation
+    // JNI methods from libgojni.so (AndroidLibV2rayLite)
     external fun startV2rayWithJson(
         vpnInterfaceFd: Int,
         configJson: String,
