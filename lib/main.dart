@@ -1,5 +1,6 @@
 import 'qr_scanner_page.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -58,30 +59,65 @@ class VPNHomePage extends StatefulWidget {
   _VPNHomePageState createState() => _VPNHomePageState();
 }
 
-class _VPNHomePageState extends State<VPNHomePage> {
+class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
   String status = '';
   bool isConnecting = false;
   List<ServerInfo> displayServers = [];
   StreamSubscription? serversSubscription;
+  StreamSubscription? connectionSubscription;
   bool showServerList = false;
   
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _initialize();
     
     // Subscribe to server updates
     serversSubscription = VPNService.serversStreamController.stream.listen((servers) {
-      setState(() {
-        displayServers = servers;
-      });
+      if (mounted) {
+        setState(() {
+          displayServers = servers;
+        });
+      }
+    });
+    
+    // Subscribe to connection state changes
+    connectionSubscription = VPNService.connectionStreamController.stream.listen((connected) {
+      if (mounted) {
+        _updateConnectionStatus();
+      }
     });
   }
   
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     serversSubscription?.cancel();
+    connectionSubscription?.cancel();
     super.dispose();
+  }
+  
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // When app comes to foreground, update UI state
+    if (state == AppLifecycleState.resumed) {
+      _updateConnectionStatus();
+    }
+  }
+  
+  void _updateConnectionStatus() {
+    setState(() {
+      if (VPNService.isConnected) {
+        if (VPNService.currentConnectedPing != null) {
+          status = '${AppLocalizations.of(context)?.connected ?? 'Connected'} (${VPNService.currentConnectedPing}ms)';
+        } else {
+          status = AppLocalizations.of(context)?.connected ?? 'Connected';
+        }
+      } else {
+        status = AppLocalizations.of(context)?.disconnected ?? 'Disconnected';
+      }
+    });
   }
   
   Future<void> _initialize() async {
@@ -90,9 +126,7 @@ class _VPNHomePageState extends State<VPNHomePage> {
     if (!VPNService.isSubscriptionValid) {
       _showSubscriptionDialog();
     } else {
-      setState(() {
-        status = AppLocalizations.of(context)?.disconnected ?? 'Disconnected';
-      });
+      _updateConnectionStatus();
     }
   }
   
@@ -129,6 +163,24 @@ class _VPNHomePageState extends State<VPNHomePage> {
         });
       }
     }
+  }
+  
+  Future<void> _connectToServer(ServerInfo server) async {
+    setState(() {
+      isConnecting = true;
+      status = AppLocalizations.of(context)?.connecting ?? 'A Moment Please...';
+    });
+    
+    bool connected = await VPNService.connect(server.config, ping: server.ping);
+    
+    setState(() {
+      isConnecting = false;
+      if (connected) {
+        status = '${AppLocalizations.of(context)?.connected ?? 'Connected'} (${server.ping}ms)';
+      } else {
+        status = 'Connection failed';
+      }
+    });
   }
   
   void _showSubscriptionDialog() {
@@ -182,9 +234,7 @@ class _VPNHomePageState extends State<VPNHomePage> {
                 bool success = await VPNService.saveSubscriptionLink(controller.text);
                 if (success) {
                   Navigator.pop(context);
-                  setState(() {
-                    status = AppLocalizations.of(context)?.disconnected ?? 'Disconnected';
-                  });
+                  _updateConnectionStatus();
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
                       content: Text(AppLocalizations.of(context)?.subscriptionActivated ?? 
@@ -486,23 +536,7 @@ class _VPNHomePageState extends State<VPNHomePage> {
                                     ),
                                   ],
                                 ),
-                                onTap: (VPNService.isConnected || isConnecting || isCurrentServer) ? null : () async {
-                                  setState(() {
-                                    isConnecting = true;
-                                    status = l10n?.connecting ?? 'A Moment Please...';
-                                  });
-                                  
-                                  bool connected = await VPNService.connect(server.config, ping: server.ping);
-                                  
-                                  setState(() {
-                                    isConnecting = false;
-                                    if (connected) {
-                                      status = '${l10n?.connected ?? 'Connected'} (${server.ping}ms)';
-                                    } else {
-                                      status = 'Connection failed';
-                                    }
-                                  });
-                                },
+                                onTap: (isConnecting || isCurrentServer) ? null : () => _connectToServer(server),
                               ),
                             );
                           },

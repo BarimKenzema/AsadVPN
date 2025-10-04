@@ -34,14 +34,21 @@ class VPNService {
   static bool isScanning = false;
   static Timer? backgroundScanTimer;
   static StreamController<List<ServerInfo>> serversStreamController = StreamController<List<ServerInfo>>.broadcast();
+  static StreamController<bool> connectionStreamController = StreamController<bool>.broadcast();
   static String? currentConnectedConfig;
   static int? currentConnectedPing;
   
   // V2Ray instance
   static FlutterV2ray flutterV2ray = FlutterV2ray(
     onStatusChanged: (status) {
+      bool wasConnected = isConnected;
       isConnected = status.state == 'CONNECTED';
       print('VPN Status Changed: ${status.state}');
+      
+      // Notify UI of connection changes
+      if (wasConnected != isConnected) {
+        connectionStreamController.add(isConnected);
+      }
     },
   );
   
@@ -391,8 +398,7 @@ class VPNService {
       return null;
     }
   }
-  
-  // Extract host from config
+    // Extract host from config
   static String _extractHost(String config) {
     try {
       if (config.contains('://')) {
@@ -460,7 +466,8 @@ class VPNService {
     if (config.toLowerCase().startsWith('ss://')) return 'Shadowsocks';
     return 'Unknown';
   }
-    // PROPER V2Ray JSON configuration generator - FULLY WORKING VERSION
+  
+  // FIXED V2Ray JSON configuration generator - THIS ROUTES ALL TRAFFIC
   static String generateV2RayConfig(String vlessUri) {
     try {
       print('Generating V2Ray config from: ${vlessUri.substring(0, min(50, vlessUri.length))}...');
@@ -482,23 +489,27 @@ class VPNService {
       
       print('Parsed: uuid=$uuid, address=$address, port=$port, type=$type, security=$security');
       
-      // Build FULL V2Ray config that actually works
-      // Using clean JSON structure without complex nested assignments
+      // Build COMPLETE V2Ray config that ACTUALLY ROUTES TRAFFIC
       String jsonConfig = '''
 {
   "log": {
     "loglevel": "warning"
   },
   "dns": {
-    "servers": ["8.8.8.8", "8.8.4.4", "1.1.1.1"]
+    "servers": ["8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1"]
   },
   "routing": {
-    "domainStrategy": "AsIs",
+    "domainStrategy": "IPIfNonMatch",
     "rules": [
       {
         "type": "field",
-        "ip": ["geoip:private"],
-        "outboundTag": "direct"
+        "outboundTag": "direct",
+        "ip": ["geoip:private"]
+      },
+      {
+        "type": "field",
+        "outboundTag": "proxy",
+        "network": "tcp,udp"
       }
     ]
   },
@@ -509,12 +520,23 @@ class VPNService {
       "listen": "127.0.0.1",
       "settings": {
         "auth": "noauth",
-        "udp": true
+        "udp": true,
+        "userLevel": 8
       },
       "sniffing": {
         "enabled": true,
         "destOverride": ["http", "tls"]
-      }
+      },
+      "tag": "socks"
+    },
+    {
+      "port": 10809,
+      "protocol": "http",
+      "listen": "127.0.0.1",
+      "settings": {
+        "userLevel": 8
+      },
+      "tag": "http"
     }
   ],
   "outbounds": [
@@ -529,7 +551,8 @@ class VPNService {
               {
                 "id": "$uuid",
                 "encryption": "$encryption",
-                "level": 0
+                "flow": "",
+                "level": 8
               }
             ]
           }
@@ -540,7 +563,8 @@ class VPNService {
         "security": "$security"${security == 'tls' ? ''',
         "tlsSettings": {
           "serverName": "$sni",
-          "allowInsecure": false,
+          "allowInsecure": true,
+          "alpn": ["h2", "http/1.1"],
           "fingerprint": "$fp"
         }''' : ''}${type == 'ws' ? ''',
         "wsSettings": {
@@ -550,10 +574,15 @@ class VPNService {
           }
         }''' : ''}${type == 'grpc' ? ''',
         "grpcSettings": {
-          "serviceName": "${params['serviceName'] ?? ''}"
+          "serviceName": "${params['serviceName'] ?? ''}",
+          "multiMode": false
         }''' : ''}
       },
-      "tag": "proxy"
+      "tag": "proxy",
+      "mux": {
+        "enabled": false,
+        "concurrency": 8
+      }
     },
     {
       "protocol": "freedom",
@@ -578,15 +607,20 @@ class VPNService {
     } catch (e, stack) {
       print('Error generating V2Ray config: $e');
       print('Stack trace: $stack');
-      
-      // Return ABSOLUTE MINIMAL config as fallback
-      return '{"outbounds":[{"protocol":"freedom"}]}';
+      return '';
     }
   }
   
-    // Connect to VPN with PROPER JSON config
+  // Connect to VPN - FIXED to properly change servers
   static Future<bool> connect(String vlessUri, {int? ping}) async {
     try {
+      // If already connected to a different server, disconnect first
+      if (isConnected && currentConnectedConfig != vlessUri) {
+        print('Disconnecting from current server to switch...');
+        await disconnect();
+        await Future.delayed(Duration(seconds: 1));
+      }
+      
       currentConnectedConfig = vlessUri;
       currentConnectedPing = ping;
       
@@ -602,8 +636,10 @@ class VPNService {
           print('Generating V2Ray JSON config...');
           String jsonConfig = generateV2RayConfig(vlessUri);
           
-          if (jsonConfig.isEmpty || jsonConfig == '{"outbounds":[{"protocol":"freedom"}]}') {
+          if (jsonConfig.isEmpty) {
             print('Failed to generate proper V2Ray config');
+            currentConnectedConfig = null;
+            currentConnectedPing = null;
             return false;
           }
           
@@ -613,7 +649,7 @@ class VPNService {
           await flutterV2ray.startV2Ray(
             remark: "AsadVPN",
             config: jsonConfig,
-            bypassSubnets: ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"],
+            bypassSubnets: [], // Empty to route ALL traffic through VPN
           );
           
           print('V2Ray started, waiting for connection...');
@@ -624,6 +660,7 @@ class VPNService {
           // Simply assume connected if no exception was thrown
           print('VPN Connected successfully!');
           isConnected = true;
+          connectionStreamController.add(true);
           startBackgroundScanning();
           
           // Save last config
@@ -634,6 +671,8 @@ class VPNService {
           
         } catch (e) {
           print('V2Ray connection error: $e');
+          currentConnectedConfig = null;
+          currentConnectedPing = null;
           
           // Try to stop V2Ray if error occurred
           try {
@@ -648,6 +687,7 @@ class VPNService {
       if (kIsWeb) {
         await Future.delayed(Duration(seconds: 2));
         isConnected = true;
+        connectionStreamController.add(true);
         startBackgroundScanning();
         return true;
       }
@@ -680,6 +720,7 @@ class VPNService {
       isConnected = false;
       currentConnectedConfig = null;
       currentConnectedPing = null;
+      connectionStreamController.add(false);
       fastestServers.clear();
       allPingableServers.clear();
       serversStreamController.add([]);
@@ -692,5 +733,6 @@ class VPNService {
   static void dispose() {
     backgroundScanTimer?.cancel();
     serversStreamController.close();
+    connectionStreamController.close();
   }
 }
