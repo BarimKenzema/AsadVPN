@@ -60,11 +60,11 @@ android {
     }
     
     packagingOptions {
-        pickFirst 'lib/arm64-v8a/libgojni.so'
-        pickFirst 'lib/armeabi-v7a/libgojni.so'
-        pickFirst 'lib/x86/libgojni.so'
-        pickFirst 'lib/x86_64/libgojni.so'
-    }
+    pickFirst 'lib/arm64-v8a/libcore.so'
+    pickFirst 'lib/armeabi-v7a/libcore.so'
+    pickFirst 'lib/x86/libcore.so'
+    pickFirst 'lib/x86_64/libcore.so'
+}
     
     namespace 'com.asad.vpn'
 }
