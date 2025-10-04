@@ -1,4 +1,3 @@
-// lib/main.dart
 import 'qr_scanner_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -113,13 +112,15 @@ class _VPNHomePageState extends State<VPNHomePage> {
       final result = await VPNService.scanAndSelectBestServer();
       
       if (result['success']) {
-        bool connected = await VPNService.connect(result['server']);
+        bool connected = await VPNService.connect(result['server'], ping: result['ping']);
         
         setState(() {
           isConnecting = false;
-          status = connected 
-              ? AppLocalizations.of(context)?.connected ?? 'Connected'
-              : 'Connection failed';
+          if (connected) {
+            status = '${AppLocalizations.of(context)?.connected ?? 'Connected'} (${result['ping']}ms)';
+          } else {
+            status = 'Connection failed';
+          }
         });
       } else {
         setState(() {
@@ -130,7 +131,7 @@ class _VPNHomePageState extends State<VPNHomePage> {
     }
   }
   
-    void _showSubscriptionDialog() {
+  void _showSubscriptionDialog() {
     final controller = TextEditingController();
     showDialog(
       context: context,
@@ -149,7 +150,6 @@ class _VPNHomePageState extends State<VPNHomePage> {
               ),
             ),
             SizedBox(height: 16),
-            // QR Code Scanner Button - THIS IS NEW
             ElevatedButton.icon(
               onPressed: () async {
                 final result = await Navigator.push(
@@ -209,7 +209,8 @@ class _VPNHomePageState extends State<VPNHomePage> {
       ),
     );
   }
-    @override
+  
+  @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     
@@ -419,8 +420,12 @@ class _VPNHomePageState extends State<VPNHomePage> {
                           itemCount: displayServers.length,
                           itemBuilder: (context, index) {
                             final server = displayServers[index];
+                            final isCurrentServer = VPNService.currentConnectedConfig == server.config;
+                            
                             return Card(
-                              color: Color(0xFF1a1a2e),
+                              color: isCurrentServer 
+                                  ? Colors.green.withOpacity(0.2)
+                                  : Color(0xFF1a1a2e),
                               margin: EdgeInsets.only(bottom: 8),
                               child: ListTile(
                                 dense: true,
@@ -446,14 +451,22 @@ class _VPNHomePageState extends State<VPNHomePage> {
                                 title: Text(
                                   server.name,
                                   style: TextStyle(
-                                    color: Colors.white,
+                                    color: isCurrentServer ? Colors.green : Colors.white,
                                     fontSize: 14,
+                                    fontWeight: isCurrentServer ? FontWeight.bold : FontWeight.normal,
                                   ),
                                   overflow: TextOverflow.ellipsis,
                                 ),
                                 trailing: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
+                                    if (isCurrentServer)
+                                      Icon(
+                                        Icons.check_circle,
+                                        size: 16,
+                                        color: Colors.green,
+                                      ),
+                                    SizedBox(width: 4),
                                     Icon(
                                       Icons.signal_cellular_alt,
                                       size: 16,
@@ -473,19 +486,21 @@ class _VPNHomePageState extends State<VPNHomePage> {
                                     ),
                                   ],
                                 ),
-                                onTap: VPNService.isConnected ? null : () async {
+                                onTap: (VPNService.isConnected || isConnecting || isCurrentServer) ? null : () async {
                                   setState(() {
                                     isConnecting = true;
                                     status = l10n?.connecting ?? 'A Moment Please...';
                                   });
                                   
-                                  bool connected = await VPNService.connect(server.config);
+                                  bool connected = await VPNService.connect(server.config, ping: server.ping);
                                   
                                   setState(() {
                                     isConnecting = false;
-                                    status = connected 
-                                        ? (l10n?.connected ?? 'Connected')
-                                        : 'Connection failed';
+                                    if (connected) {
+                                      status = '${l10n?.connected ?? 'Connected'} (${server.ping}ms)';
+                                    } else {
+                                      status = 'Connection failed';
+                                    }
                                   });
                                 },
                               ),
