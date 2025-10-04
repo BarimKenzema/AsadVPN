@@ -4,15 +4,13 @@ import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.VpnService
-import io.flutter.embedding.engine.plugins.FlutterPlugin
-import io.flutter.embedding.engine.plugins.activity.ActivityAware
-import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
+import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 
-class VpnPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
+class VpnPlugin : MethodCallHandler {
     private lateinit var channel: MethodChannel
     private lateinit var context: Context
     private var activity: Activity? = null
@@ -20,9 +18,10 @@ class VpnPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
     private var pendingResult: Result? = null
     private var pendingConfig: String? = null
     
-    override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-        context = binding.applicationContext
-        channel = MethodChannel(binding.binaryMessenger, "com.asad.vpn/vpn")
+    fun onAttachedToEngine(messenger: BinaryMessenger, activity: Activity) {
+        this.activity = activity
+        this.context = activity.applicationContext
+        channel = MethodChannel(messenger, "com.asad.vpn/vpn")
         channel.setMethodCallHandler(this)
     }
     
@@ -88,23 +87,7 @@ class VpnPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
         }
     }
     
-    override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+    fun onDetachedFromEngine() {
         channel.setMethodCallHandler(null)
-    }
-    
-    override fun onAttachedToActivity(binding: ActivityPluginBinding) {
-        activity = binding.activity
-    }
-    
-    override fun onDetachedFromActivity() {
-        activity = null
-    }
-    
-    override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
-        activity = binding.activity
-    }
-    
-    override fun onDetachedFromActivityForConfigChanges() {
-        activity = null
     }
 }
