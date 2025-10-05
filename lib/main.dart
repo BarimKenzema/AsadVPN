@@ -1,49 +1,38 @@
 import 'qr_scanner_page.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'services/native_vpn_service.dart';
+import 'services/vpn_service.dart';
 import 'dart:async';
 
-void main() {
-  runApp(AsadVPNApp());
-}
+void main() => runApp(AsadVPNApp());
 
 class AsadVPNApp extends StatefulWidget {
   @override
-  _AsadVPNAppState createState() => _AsadVPNAppState();
+  State<AsadVPNApp> createState() => _AsadVPNAppState();
 }
 
 class _AsadVPNAppState extends State<AsadVPNApp> {
-  Locale _locale = Locale('en');
-
-  void _changeLanguage(Locale locale) {
-    setState(() {
-      _locale = locale;
-    });
-  }
+  Locale _locale = const Locale('en');
+  void _changeLanguage(Locale locale) => setState(() => _locale = locale);
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'AsadVPN',
       locale: _locale,
-      localizationsDelegates: [
+      localizationsDelegates: const [
         AppLocalizations.delegate,
         GlobalMaterialLocalizations.delegate,
         GlobalWidgetsLocalizations.delegate,
         GlobalCupertinoLocalizations.delegate,
       ],
-      supportedLocales: [
-        Locale('en'),
-        Locale('fa'),
-      ],
+      supportedLocales: const [Locale('en'), Locale('fa')],
       theme: ThemeData(
         primarySwatch: Colors.blue,
         brightness: Brightness.dark,
-        scaffoldBackgroundColor: Color(0xFF1a1a2e),
+        scaffoldBackgroundColor: const Color(0xFF1a1a2e),
       ),
       home: VPNHomePage(onLanguageChanged: _changeLanguage),
     );
@@ -51,84 +40,64 @@ class _AsadVPNAppState extends State<AsadVPNApp> {
 }
 
 class VPNHomePage extends StatefulWidget {
-  final Function(Locale) onLanguageChanged;
-
-  VPNHomePage({required this.onLanguageChanged});
+  final void Function(Locale) onLanguageChanged;
+  const VPNHomePage({required this.onLanguageChanged, Key? key}) : super(key: key);
 
   @override
-  _VPNHomePageState createState() => _VPNHomePageState();
+  State<VPNHomePage> createState() => _VPNHomePageState();
 }
 
 class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
-  String status = '';
+  String status = 'Disconnected';
   bool isConnecting = false;
   List<ServerInfo> displayServers = [];
-  StreamSubscription? serversSubscription;
-  StreamSubscription? connectionSubscription;
+  StreamSubscription? serversSub;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _initialize();
-
-    serversSubscription = NativeVPNService.serversStreamController.stream.listen((servers) {
+    serversSub = VPNService.serversStreamController.stream.listen((servers) {
       if (!mounted) return;
-      setState(() {
-        displayServers = servers;
-      });
-    });
-
-    connectionSubscription = NativeVPNService.connectionStateController.stream.listen((connected) {
-      if (!mounted) return;
-      _updateConnectionStatus();
+      setState(() => displayServers = servers);
     });
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    serversSubscription?.cancel();
-    connectionSubscription?.cancel();
+    serversSub?.cancel();
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _updateConnectionStatus();
-    }
-  }
-
-  void _updateConnectionStatus() {
-    final l10n = AppLocalizations.of(context);
-    setState(() {
-      if (NativeVPNService.isConnected) {
-        if (NativeVPNService.currentConnectedPing != null) {
-          status = '${l10n?.connected ?? 'Connected'} (${NativeVPNService.currentConnectedPing}ms)';
-        } else {
-          status = l10n?.connected ?? 'Connected';
-        }
-      } else {
-        status = l10n?.disconnected ?? 'Disconnected';
-      }
-    });
+    if (state == AppLifecycleState.resumed) _updateStatus();
   }
 
   Future<void> _initialize() async {
-    await NativeVPNService.init();
-
-    if (!NativeVPNService.isSubscriptionValid) {
+    await VPNService.init();
+    if (!VPNService.isSubscriptionValid) {
       _showSubscriptionDialog();
     } else {
-      _updateConnectionStatus();
+      _updateStatus();
     }
+  }
+
+  void _updateStatus() {
+    final l10n = AppLocalizations.of(context);
+    setState(() {
+      status = VPNService.isConnected
+          ? (l10n?.connected ?? 'Connected')
+          : (l10n?.disconnected ?? 'Disconnected');
+    });
   }
 
   Future<void> _toggleConnection() async {
     final l10n = AppLocalizations.of(context);
-    if (NativeVPNService.isConnected) {
-      await NativeVPNService.disconnect();
+    if (VPNService.isConnected) {
+      await VPNService.disconnect();
       setState(() {
         status = l10n?.disconnected ?? 'Disconnected';
         displayServers = [];
@@ -139,18 +108,14 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
         status = l10n?.connecting ?? 'A Moment Please...';
       });
 
-      final result = await NativeVPNService.scanAndSelectBestServer();
-
+      final result = await VPNService.scanAndSelectBestServer();
       if (result['success'] == true) {
-        bool connected = await NativeVPNService.connect(result['server'], ping: result['ping']);
-
+        final ok = await VPNService.connect(result['server']);
         setState(() {
           isConnecting = false;
-          if (connected) {
-            status = '${l10n?.connected ?? 'Connected'} (${result['ping']}ms)';
-          } else {
-            status = 'Connection failed';
-          }
+          status = ok
+              ? (l10n?.connected ?? 'Connected')
+              : 'Connection failed';
         });
       } else {
         setState(() {
@@ -166,70 +131,62 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        title: Text(AppLocalizations.of(context)?.enterSubscription ?? 'Enter Subscription'),
+      builder: (ctx) => AlertDialog(
+        title: Text(AppLocalizations.of(ctx)?.enterSubscription ?? 'Enter Subscription'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             TextField(
               controller: controller,
               decoration: InputDecoration(
-                labelText: AppLocalizations.of(context)?.subscriptionLink ?? 'Subscription Link',
-                border: OutlineInputBorder(),
+                labelText: AppLocalizations.of(ctx)?.subscriptionLink ?? 'Subscription Link',
+                border: const OutlineInputBorder(),
                 hintText: 'https://konabalan.pythonanywhere.com/sub/...',
               ),
             ),
-            SizedBox(height: 16),
+            const SizedBox(height: 16),
             ElevatedButton.icon(
               onPressed: () async {
                 final result = await Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (context) => QRScannerPage()),
+                  MaterialPageRoute(builder: (_) => QRScannerPage()),
                 );
-                if (result != null) {
-                  controller.text = result;
-                }
+                if (result != null) controller.text = result;
               },
-              icon: Icon(Icons.qr_code_scanner),
-              label: Text('Scan QR Code'),
+              icon: const Icon(Icons.qr_code_scanner),
+              label: const Text('Scan QR Code'),
               style: ElevatedButton.styleFrom(
                 backgroundColor: Colors.blue,
-                minimumSize: Size(double.infinity, 45),
+                minimumSize: const Size(double.infinity, 45),
               ),
             ),
           ],
         ),
         actions: [
           TextButton(
-            onPressed: () {
-              launchUrl(Uri.parse('https://t.me/VPNProxyTestSupport'));
-            },
-            child: Text(AppLocalizations.of(context)?.getSubscription ?? 'Get Subscription'),
+            onPressed: () => launchUrl(Uri.parse('https://t.me/VPNProxyTestSupport')),
+            child: Text(AppLocalizations.of(ctx)?.getSubscription ?? 'Get Subscription'),
           ),
           TextButton(
             onPressed: () async {
               if (controller.text.isNotEmpty) {
-                bool success = await NativeVPNService.saveSubscriptionLink(controller.text);
-                if (success) {
-                  Navigator.pop(context);
-                  _updateConnectionStatus();
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(AppLocalizations.of(context)?.subscriptionActivated ?? 'Subscription activated!'),
-                      backgroundColor: Colors.green,
-                    ),
-                  );
+                final ok = await VPNService.saveSubscriptionLink(controller.text);
+                if (ok) {
+                  Navigator.pop(ctx);
+                  _updateStatus();
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    content: Text(AppLocalizations.of(context)?.subscriptionActivated ?? 'Subscription activated!'),
+                    backgroundColor: Colors.green,
+                  ));
                 } else {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(AppLocalizations.of(context)?.invalidSubscription ?? 'Invalid subscription'),
-                      backgroundColor: Colors.red,
-                    ),
-                  );
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    content: Text(AppLocalizations.of(context)?.invalidSubscription ?? 'Invalid subscription'),
+                    backgroundColor: Colors.red,
+                  ));
                 }
               }
             },
-            child: Text(AppLocalizations.of(context)?.activate ?? 'Activate'),
+            child: Text(AppLocalizations.of(ctx)?.activate ?? 'Activate'),
           ),
         ],
       ),
@@ -243,41 +200,34 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
       status = l10n?.connecting ?? 'A Moment Please...';
     });
 
-    bool connected = await NativeVPNService.connect(server.config, ping: server.ping);
+    final ok = await VPNService.connect(server.config);
 
     setState(() {
       isConnecting = false;
-      if (connected) {
-        status = '${l10n?.connected ?? 'Connected'} (${server.ping}ms)';
-      } else {
-        status = 'Connection failed';
-      }
+      status = ok ? (l10n?.connected ?? 'Connected') : 'Connection failed';
     });
   }
 
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
-
     return Scaffold(
-      backgroundColor: Color(0xFF1a1a2e),
+      backgroundColor: const Color(0xFF1a1a2e),
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
         actions: [
           PopupMenuButton<Locale>(
-            icon: Icon(Icons.language),
-            onSelected: (Locale locale) {
-              widget.onLanguageChanged(locale);
-            },
-            itemBuilder: (context) => [
+            icon: const Icon(Icons.language),
+            onSelected: widget.onLanguageChanged,
+            itemBuilder: (_) => const [
               PopupMenuItem(value: Locale('en'), child: Text('English')),
               PopupMenuItem(value: Locale('fa'), child: Text('فارسی')),
             ],
           ),
-          if (NativeVPNService.isSubscriptionValid)
+          if (VPNService.isSubscriptionValid)
             IconButton(
-              icon: Icon(Icons.card_membership),
+              icon: const Icon(Icons.card_membership),
               onPressed: _showSubscriptionDialog,
               tooltip: l10n?.changeSubscription ?? 'Change Subscription',
             ),
@@ -289,32 +239,23 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text(
-                  l10n?.appTitle ?? 'AsadVPN',
-                  style: TextStyle(fontSize: 36, fontWeight: FontWeight.bold, color: Colors.white),
-                ),
-                Text(
-                  l10n?.unlimited ?? 'UNLIMITED',
-                  style: TextStyle(fontSize: 14, color: Colors.grey),
-                ),
-                SizedBox(height: 50),
+                Text('AsadVPN', style: const TextStyle(fontSize: 36, fontWeight: FontWeight.bold, color: Colors.white)),
+                const Text('UNLIMITED', style: TextStyle(fontSize: 14, color: Colors.grey)),
+                const SizedBox(height: 50),
                 GestureDetector(
-                  onTap: (!NativeVPNService.isSubscriptionValid || isConnecting) ? null : _toggleConnection,
+                  onTap: (!VPNService.isSubscriptionValid || isConnecting) ? null : _toggleConnection,
                   child: Container(
-                    width: 150,
-                    height: 150,
+                    width: 150, height: 150,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       gradient: LinearGradient(
-                        colors: NativeVPNService.isConnected ? [Colors.green, Colors.greenAccent] : [Colors.red, Colors.redAccent],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
+                        colors: VPNService.isConnected ? [Colors.green, Colors.greenAccent] : [Colors.red, Colors.redAccent],
+                        begin: Alignment.topLeft, end: Alignment.bottomRight,
                       ),
                       boxShadow: [
                         BoxShadow(
-                          color: NativeVPNService.isConnected ? Colors.green.withOpacity(0.5) : Colors.red.withOpacity(0.5),
-                          blurRadius: 20,
-                          spreadRadius: 5,
+                          color: (VPNService.isConnected ? Colors.green : Colors.red).withOpacity(0.5),
+                          blurRadius: 20, spreadRadius: 5,
                         ),
                       ],
                     ),
@@ -322,71 +263,58 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(NativeVPNService.isConnected ? Icons.lock : Icons.power_settings_new, size: 60, color: Colors.white),
-                          if (NativeVPNService.isConnected)
-                            Padding(
+                          Icon(VPNService.isConnected ? Icons.lock : Icons.power_settings_new, size: 60, color: Colors.white),
+                          if (VPNService.isConnected)
+                            const Padding(
                               padding: EdgeInsets.only(top: 8),
-                              child: Text(
-                                l10n?.disconnect ?? 'Disconnect',
-                                style: TextStyle(color: Colors.white, fontSize: 12),
-                              ),
+                              child: Text('Disconnect', style: TextStyle(color: Colors.white, fontSize: 12)),
                             ),
                         ],
                       ),
                     ),
                   ),
                 ),
-                SizedBox(height: 30),
-                Text(
-                  isConnecting ? (l10n?.connecting ?? 'A Moment Please...') : status,
-                  style: TextStyle(fontSize: 18, color: Colors.white70),
-                ),
+                const SizedBox(height: 30),
+                Text(isConnecting ? (l10n?.connecting ?? 'A Moment Please...') : status, style: const TextStyle(fontSize: 18, color: Colors.white70)),
                 if (isConnecting)
-                  Padding(
+                  const Padding(
                     padding: EdgeInsets.only(top: 20),
                     child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(Colors.blue)),
                   ),
-                if (!NativeVPNService.isSubscriptionValid)
+                if (!VPNService.isSubscriptionValid)
                   Padding(
-                    padding: EdgeInsets.only(top: 20),
+                    padding: const EdgeInsets.only(top: 20),
                     child: ElevatedButton.icon(
                       onPressed: _showSubscriptionDialog,
-                      icon: Icon(Icons.add),
+                      icon: const Icon(Icons.add),
                       label: Text(l10n?.enterSubscription ?? 'Enter Subscription'),
-                      style: ElevatedButton.styleFrom(backgroundColor: Colors.blue, padding: EdgeInsets.symmetric(horizontal: 20, vertical: 12)),
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.blue, padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12)),
                     ),
                   ),
               ],
             ),
           ),
-
-          // Server List
-          Container(
+          // Server list
+            Container(
             height: 250,
-            decoration: BoxDecoration(
+            decoration: const BoxDecoration(
               color: Color(0xFF16213e),
               borderRadius: BorderRadius.only(topLeft: Radius.circular(20), topRight: Radius.circular(20)),
             ),
             child: Column(
               children: [
                 Container(
-                  padding: EdgeInsets.all(16),
+                  padding: const EdgeInsets.all(16),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(l10n?.serverList ?? 'Server List', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
-                      if (NativeVPNService.isScanning)
-                        Row(
-                          children: [
-                            SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.blue)),
-                            ),
-                            SizedBox(width: 8),
-                            Text(l10n?.scanningServers ?? 'Scanning...', style: TextStyle(color: Colors.blue, fontSize: 12)),
-                          ],
-                        ),
+                      Text(l10n?.serverList ?? 'Server List', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
+                      if (VPNService.isScanning)
+                        Row(children: const [
+                          SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.blue))),
+                          SizedBox(width: 8),
+                          Text('Scanning...', style: TextStyle(color: Colors.blue, fontSize: 12)),
+                        ]),
                     ],
                   ),
                 ),
@@ -394,48 +322,51 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                   child: displayServers.isEmpty
                       ? Center(
                           child: Text(
-                            NativeVPNService.isConnected ? (l10n?.scanningServers ?? 'Scanning servers...') : (l10n?.noServers ?? 'No servers available'),
-                            style: TextStyle(color: Colors.grey, fontSize: 14),
+                            VPNService.isConnected ? (l10n?.scanningServers ?? 'Scanning servers...') : (l10n?.noServers ?? 'No servers available'),
+                            style: const TextStyle(color: Colors.grey, fontSize: 14),
                           ),
                         )
                       : ListView.builder(
-                          padding: EdgeInsets.symmetric(horizontal: 16),
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
                           itemCount: displayServers.length,
                           itemBuilder: (context, index) {
                             final server = displayServers[index];
-                            final isCurrent = NativeVPNService.currentConnectedConfig == server.config;
+                            final isCurrent = VPNService.isConnected && (server.config == VPNService.configServers.firstWhere((_) => true, orElse: () => server.config));
                             return Card(
-                              color: isCurrent ? Colors.green.withOpacity(0.2) : Color(0xFF1a1a2e),
-                              margin: EdgeInsets.only(bottom: 8),
+                              color: isCurrent ? Colors.green.withOpacity(0.2) : const Color(0xFF1a1a2e),
+                              margin: const EdgeInsets.only(bottom: 8),
                               child: ListTile(
                                 dense: true,
                                 leading: Container(
-                                  padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                                   decoration: BoxDecoration(
-                                    color: server.protocol == 'VLESS' ? Colors.green.withOpacity(0.2) : Colors.blue.withOpacity(0.2),
+                                    color: Colors.green.withOpacity(0.2),
                                     borderRadius: BorderRadius.circular(4),
                                   ),
-                                  child: Text(
-                                    server.protocol,
-                                    style: TextStyle(fontSize: 10, color: server.protocol == 'VLESS' ? Colors.green : Colors.blue, fontWeight: FontWeight.bold),
-                                  ),
+                                  child: const Text('VLESS', style: TextStyle(fontSize: 10, color: Colors.green, fontWeight: FontWeight.bold)),
                                 ),
-                                title: Text(
-                                  server.name,
-                                  style: TextStyle(color: isCurrent ? Colors.green : Colors.white, fontSize: 14, fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
+                                title: Text(server.name, style: const TextStyle(color: Colors.white, fontSize: 14), overflow: TextOverflow.ellipsis),
                                 trailing: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    if (isCurrent) Icon(Icons.check_circle, size: 16, color: Colors.green),
-                                    SizedBox(width: 4),
+                                    if (isCurrent) const Icon(Icons.check_circle, size: 16, color: Colors.green),
+                                    const SizedBox(width: 4),
                                     Icon(Icons.signal_cellular_alt, size: 16, color: server.ping < 100 ? Colors.green : server.ping < 200 ? Colors.orange : Colors.red),
-                                    SizedBox(width: 4),
-                                    Text('${server.ping}ms', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                                    const SizedBox(width: 4),
+                                    Text('${server.ping}ms', style: const TextStyle(color: Colors.grey, fontSize: 12)),
                                   ],
                                 ),
-                                onTap: (isConnecting || isCurrent) ? null : () => _connectToServer(server),
+                                onTap: isCurrent || isConnecting ? null : () async {
+                                  setState(() {
+                                    isConnecting = true;
+                                    status = l10n?.connecting ?? 'A Moment Please...';
+                                  });
+                                  final ok = await VPNService.connect(server.config);
+                                  setState(() {
+                                    isConnecting = false;
+                                    status = ok ? (l10n?.connected ?? 'Connected') : 'Connection failed';
+                                  });
+                                },
                               ),
                             );
                           },

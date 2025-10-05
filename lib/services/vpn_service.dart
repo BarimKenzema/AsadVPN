@@ -1,20 +1,20 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
-import 'dart:async';
+
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter_v2ray/flutter_v2ray.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:device_info_plus/device_info_plus.dart';
-import 'package:flutter_v2ray/flutter_v2ray.dart';
 
 class ServerInfo {
-  final String config;
-  final String protocol;
-  final int ping;
-  final String name;
-  
+  final String config;   // the raw vless://...
+  final String protocol; // "VLESS"
+  final int ping;        // ms
+  final String name;     // remark/host
+
   ServerInfo({
     required this.config,
     required this.protocol,
@@ -25,39 +25,28 @@ class ServerInfo {
 
 class VPNService {
   static String? androidId;
+  static FlutterV2ray flutterV2ray = FlutterV2ray(
+    onStatusChanged: (status) {
+      isConnected = status.state == 'CONNECTED';
+      debugPrint('VPN Status Changed: ${status.state}');
+    },
+  );
+
+  static bool isConnected = false;
+  static bool isSubscriptionValid = false;
+  static String? currentSubscriptionLink;
   static List<String> configServers = [];
   static List<ServerInfo> fastestServers = [];
   static List<ServerInfo> allPingableServers = [];
-  static bool isConnected = false;
-  static String? currentSubscriptionLink;
-  static bool isSubscriptionValid = false;
   static bool isScanning = false;
   static Timer? backgroundScanTimer;
+
   static StreamController<List<ServerInfo>> serversStreamController = StreamController<List<ServerInfo>>.broadcast();
-  static StreamController<bool> connectionStreamController = StreamController<bool>.broadcast();
-  static String? currentConnectedConfig;
-  static int? currentConnectedPing;
-  
-  // V2Ray instance
-  static FlutterV2ray flutterV2ray = FlutterV2ray(
-    onStatusChanged: (status) {
-      bool wasConnected = isConnected;
-      isConnected = status.state == 'CONNECTED';
-      print('VPN Status Changed: ${status.state}');
-      
-      // Notify UI of connection changes
-      if (wasConnected != isConnected) {
-        connectionStreamController.add(isConnected);
-      }
-    },
-  );
-  
-  // Initialize
+
   static Future<void> init() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      
-      // Get device ID for tracking
+
       if (!kIsWeb) {
         final deviceInfo = DeviceInfoPlugin();
         if (Platform.isAndroid) {
@@ -67,672 +56,386 @@ class VPNService {
           androidId = 'ios_device';
         }
       } else {
-        androidId = 'web_test_${DateTime.now().millisecondsSinceEpoch}';
+        androidId = 'web_${DateTime.now().millisecondsSinceEpoch}';
       }
-      
-      // Initialize V2Ray
+
       if (!kIsWeb && Platform.isAndroid) {
         try {
           await flutterV2ray.initializeV2Ray();
         } catch (e) {
-          print('V2Ray init error (non-fatal): $e');
+          debugPrint('V2Ray init error: $e');
         }
       }
-      
-      // Load saved subscription link
+
       currentSubscriptionLink = prefs.getString('subscription_link');
-      
-      // If we have a saved subscription, validate it
       if (currentSubscriptionLink != null && currentSubscriptionLink!.isNotEmpty) {
         await validateSubscription();
       }
     } catch (e) {
-      print('Init error: $e');
+      debugPrint('Init error: $e');
       androidId = 'fallback_${DateTime.now().millisecondsSinceEpoch}';
     }
   }
-  
-  // Validate and fetch configs from subscription link
+
   static Future<bool> validateSubscription() async {
     if (currentSubscriptionLink == null || currentSubscriptionLink!.isEmpty) {
-      print('validateSubscription: No subscription link');
+      isSubscriptionValid = false; return false;
+    }
+    try {
+      debugPrint('=== VALIDATING SUBSCRIPTION ===\nURL: $currentSubscriptionLink');
+      final resp = await http.get(Uri.parse(currentSubscriptionLink!), headers: {'User-Agent': 'AsadVPN/1.0'}).timeout(const Duration(seconds: 20));
+
+      debugPrint('Response status: ${resp.statusCode}, body length: ${resp.body.length}');
+      if (resp.statusCode != 200) {
+        isSubscriptionValid = false; return false;
+      }
+
+      var content = resp.body;
+
+      if (content.contains('<!DOCTYPE') || content.contains('<html')) {
+        debugPrint('Received HTML instead of configs'); isSubscriptionValid = false; return false;
+      }
+
+      // If base64-encoded subscription, decode
+      if (!content.contains('://')) {
+        try {
+          content = utf8.decode(base64.decode(content.trim()));
+        } catch (_) {}
+      }
+
+      final lines = content.split('\n')
+          .map((l) => l.trim())
+          .where((l) => l.isNotEmpty && !l.startsWith('#'))
+          .toList();
+
+      final vless = lines.where((l) => l.toLowerCase().startsWith('vless://')).toList();
+      configServers = vless.isNotEmpty ? vless : lines;
+
+      isSubscriptionValid = configServers.isNotEmpty;
+      debugPrint('Total configs: ${lines.length}, VLESS: ${vless.length}');
+      return isSubscriptionValid;
+    } catch (e) {
+      debugPrint('validateSubscription error: $e');
       isSubscriptionValid = false;
       return false;
     }
-    
-    try {
-      print('=== VALIDATING SUBSCRIPTION ===');
-      print('URL: $currentSubscriptionLink');
-      
-      // Fetch configs from the subscription link
-      final response = await http.get(
-        Uri.parse(currentSubscriptionLink!),
-        headers: {
-          'User-Agent': 'AsadVPN/1.0',
-        },
-      ).timeout(Duration(seconds: 15));
-      
-      print('Response status: ${response.statusCode}');
-      print('Response body length: ${response.body.length}');
-      
-      if (response.statusCode == 200) {
-        String content = response.body;
-        
-        // Check if subscription is expired
-        if (content.contains('SUBSCRIPTION_EXPIRED') || content.contains('expired')) {
-          print('Subscription expired detected');
-          isSubscriptionValid = false;
-          configServers = [];
-          return false;
-        }
-        
-        // Check if response is HTML (error page)
-        if (content.contains('<!DOCTYPE') || content.contains('<html')) {
-          print('ERROR: Received HTML instead of configs');
-          isSubscriptionValid = false;
-          return false;
-        }
-        
-        // DECODE BASE64 if needed
-        String decodedContent = content;
-        try {
-          // Check if content is base64 encoded
-          if (!content.contains('://')) {
-            print('Content appears to be base64 encoded, decoding...');
-            decodedContent = utf8.decode(base64.decode(content.trim()));
-            print('Decoded successfully');
-          }
-        } catch (e) {
-          print('Not base64 or decode failed, using as-is');
-          decodedContent = content;
-        }
-        
-        // Parse ALL configs
-        var allConfigs = decodedContent
-            .split('\n')
-            .where((line) => line.trim().isNotEmpty)
-            .where((line) => !line.startsWith('#'))
-            .toList();
-        
-        print('Total configs found: ${allConfigs.length}');
-        
-        // FILTER ONLY VLESS CONFIGS
-        configServers = allConfigs
-            .where((config) => config.toLowerCase().startsWith('vless://'))
-            .toList();
-        
-        print('VLESS configs: ${configServers.length}');
-        print('Other protocols: ${allConfigs.length - configServers.length}');
-        
-        // If no VLESS but has other configs, use them
-        if (configServers.isEmpty && allConfigs.isNotEmpty) {
-          print('WARNING: No VLESS configs found, using all configs');
-          configServers = allConfigs;
-        }
-        
-        isSubscriptionValid = configServers.isNotEmpty;
-        return isSubscriptionValid;
-      } else {
-        print('ERROR: Status code ${response.statusCode}');
-        isSubscriptionValid = false;
-        return false;
-      }
-    } catch (e) {
-      print('ERROR validating subscription: $e');
-      isSubscriptionValid = false;
-    }
-    
-    return false;
   }
-  
-  // Save subscription link
+
   static Future<bool> saveSubscriptionLink(String link) async {
     try {
+      link = link.trim().replaceAll(RegExp(r'[\u200B-\u200D\uFEFF]'), '');
+      if (!link.startsWith('http://') && !link.startsWith('https://')) return false;
       final prefs = await SharedPreferences.getInstance();
-      
-      // Clean the link
-      link = link.trim();
-      
-      print('=== SAVING SUBSCRIPTION ===');
-      print('Original input: "$link"');
-      
-      // Remove any invisible characters
-      link = link.replaceAll(RegExp(r'[\u200B-\u200D\uFEFF]'), '');
-      
-      // Basic URL validation
-      if (!link.startsWith('http://') && !link.startsWith('https://')) {
-        print('ERROR: Link must start with http:// or https://');
-        return false;
-      }
-      
-      // Check if it's a pythonanywhere subscription
-      if (!link.contains('pythonanywhere.com/sub/')) {
-        print('ERROR: Not a pythonanywhere subscription link');
-        return false;
-      }
-      
       currentSubscriptionLink = link;
       await prefs.setString('subscription_link', link);
-      
-      // Validate the new subscription
-      bool isValid = await validateSubscription();
-      
-      if (!isValid) {
-        await prefs.remove('subscription_link');
-        currentSubscriptionLink = null;
+
+      final ok = await validateSubscription();
+      if (!ok) {
+        await prefs.remove('subscription_link'); currentSubscriptionLink = null;
       }
-      
-      return isValid;
+      return ok;
     } catch (e) {
-      print('ERROR saving subscription: $e');
-      return false;
+      debugPrint('saveSubscriptionLink error: $e'); return false;
     }
   }
-  
-  // Smart server selection with batch scanning
+
   static Future<Map<String, dynamic>> scanAndSelectBestServer() async {
-    if (configServers.isEmpty) {
-      return {'success': false, 'error': 'No servers available'};
-    }
-    
-    isScanning = true;
-    fastestServers.clear();
-    
-    List<String> vlessServers = List.from(configServers);
-    vlessServers.shuffle(Random());
-    
-    // Test random batch of 10 VLESS servers
-    List<String> batchToTest = vlessServers.take(min(10, vlessServers.length)).toList();
-    
-    print('Testing ${batchToTest.length} servers...');
-    
-    // Test batch for 3 seconds
-    List<Future<ServerInfo?>> tests = [];
-    for (String config in batchToTest) {
-      tests.add(_testServerWithPing(config, 3));
-    }
-    
-    // Wait for results
+    if (configServers.isEmpty) return {'success': false, 'error': 'No servers available'};
+
+    isScanning = true; fastestServers.clear();
+
+    final shuffled = List<String>.from(configServers)..shuffle(Random());
+    final batch = shuffled.take(min(10, shuffled.length)).toList();
+
+    debugPrint('Testing ${batch.length} servers...');
+    final tests = batch.map((cfg) => _testServerWithPing(cfg, 3)).toList();
     final results = await Future.wait(tests);
-    
-    // Filter successful pings and sort by speed
-    List<ServerInfo> workingServers = results
-        .where((server) => server != null)
-        .cast<ServerInfo>()
-        .toList();
-    
-    workingServers.sort((a, b) => a.ping.compareTo(b.ping));
-    
-    // Update fastest servers list
-    fastestServers = workingServers;
-    serversStreamController.add(fastestServers);
-    
-    print('Found ${workingServers.length} working servers');
-    
-    // Select best server
-    ServerInfo? bestServer = workingServers.isNotEmpty ? workingServers.first : null;
-    
+
+    final working = results.whereType<ServerInfo>().toList()..sort((a, b) => a.ping.compareTo(b.ping));
+    fastestServers = working; serversStreamController.add(fastestServers);
     isScanning = false;
-    
-    if (bestServer != null) {
-      currentConnectedPing = bestServer.ping;
+
+    debugPrint('Found ${working.length} working servers');
+    if (working.isNotEmpty) {
       return {
         'success': true,
-        'server': bestServer.config,
-        'protocol': bestServer.protocol,
-        'ping': bestServer.ping,
-        'candidates': workingServers.length
+        'server': working.first.config,
+        'protocol': working.first.protocol,
+        'ping': working.first.ping
       };
     }
-    
-    return {'success': false, 'error': 'No working servers found'};
+    return {'success': false, 'error': 'No working servers'};
   }
-  
-  // Background scanning
+
   static void startBackgroundScanning() {
-    if (backgroundScanTimer != null) return;
-    
-    backgroundScanTimer = Timer.periodic(Duration(seconds: 10), (timer) async {
+    backgroundScanTimer?.cancel();
+    backgroundScanTimer = Timer.periodic(const Duration(seconds: 10), (t) async {
       if (allPingableServers.length >= 44) {
-        timer.cancel();
-        backgroundScanTimer = null;
-        print('Found 44 pingable servers');
+        t.cancel(); backgroundScanTimer = null;
         serversStreamController.add(allPingableServers);
+        debugPrint('Found 44 pingable servers');
         return;
       }
-      
-      List<String> untested = configServers.where((config) {
-        return !allPingableServers.any((server) => server.config == config);
-      }).toList();
-      
+      final untested = configServers.where((cfg) => !allPingableServers.any((s) => s.config == cfg)).toList();
       if (untested.isEmpty) return;
-      
       untested.shuffle(Random());
-      List<String> batch = untested.take(10).toList();
-      
-      List<Future<ServerInfo?>> tests = [];
-      for (String config in batch) {
-        tests.add(_testServerWithPing(config, 2));
-      }
-      
+      final batch = untested.take(10).toList();
+
+      final tests = batch.map((cfg) => _testServerWithPing(cfg, 2)).toList();
       final results = await Future.wait(tests);
-      
-      for (var server in results) {
-        if (server != null && !allPingableServers.any((s) => s.config == server.config)) {
-          allPingableServers.add(server);
+
+      for (final srv in results.whereType<ServerInfo>()) {
+        if (!allPingableServers.any((s) => s.config == srv.config)) {
+          allPingableServers.add(srv);
         }
       }
-      
       allPingableServers.sort((a, b) => a.ping.compareTo(b.ping));
-      print('Background scan: ${allPingableServers.length} servers found');
       serversStreamController.add(allPingableServers);
+      debugPrint('Background scan: ${allPingableServers.length} servers');
     });
   }
-  
-  // Test server with real TCP ping
-  static Future<ServerInfo?> _testServerWithPing(String config, int timeoutSeconds) async {
+
+  static Future<ServerInfo?> _testServerWithPing(String uri, int timeoutSec) async {
     try {
-      String protocol = _getProtocol(config);
-      String name = _extractServerName(config);
-      
-      // URL decode the name
+      final name = _extractName(uri);
+      final host = _extractHost(uri);
+      var port = _extractPort(uri);
+      if (host.isEmpty) return null;
+
+      final sw = Stopwatch()..start();
       try {
-        name = Uri.decodeComponent(name);
-      } catch (e) {
-        // Keep original if decode fails
-      }
-      
-      if (kIsWeb) {
-        return ServerInfo(
-          config: config,
-          protocol: protocol,
-          ping: Random().nextInt(200) + 20,
-          name: name,
-        );
-      }
-      
-      String host = _extractHost(config);
-      int port = _extractPort(config);
-      
-      if (host.isEmpty || host == '127.0.0.1') return null;
-      
-      final stopwatch = Stopwatch()..start();
-      
-      try {
-        // Try TCP connection for real ping
-        final socket = await Socket.connect(
-          host, 
-          port,
-          timeout: Duration(seconds: timeoutSeconds),
-        );
-        
-        stopwatch.stop();
+        final socket = await Socket.connect(host, port, timeout: Duration(seconds: timeoutSec));
+        sw.stop();
         await socket.close();
-        
-        int realPing = stopwatch.elapsedMilliseconds;
-        if (realPing < 20) realPing = Random().nextInt(30) + 20;
-        
-        return ServerInfo(
-          config: config,
-          protocol: protocol,
-          ping: realPing,
-          name: name,
-        );
-      } catch (e) {
-        // Try DNS as fallback
+        var ping = sw.elapsedMilliseconds;
+        if (ping < 20) ping = 20 + Random().nextInt(30);
+        return ServerInfo(config: uri, protocol: 'VLESS', ping: ping, name: name);
+      } catch (_) {
+        // DNS fallback
         try {
-          await InternetAddress.lookup(host).timeout(Duration(seconds: timeoutSeconds));
-          stopwatch.stop();
-          
-          return ServerInfo(
-            config: config,
-            protocol: protocol,
-            ping: stopwatch.elapsedMilliseconds + Random().nextInt(50) + 30,
-            name: name,
-          );
-        } catch (e) {
+          await InternetAddress.lookup(host).timeout(Duration(seconds: timeoutSec));
+          sw.stop();
+          final ping = sw.elapsedMilliseconds + Random().nextInt(50) + 30;
+          return ServerInfo(config: uri, protocol: 'VLESS', ping: ping, name: name);
+        } catch (_) {
           return null;
         }
       }
-    } catch (e) {
+    } catch (_) {
       return null;
     }
   }
-    // Extract host from config
-  static String _extractHost(String config) {
+
+  static String _extractHost(String uri) {
+    try { return Uri.parse(uri.split('#').first).host; } catch (_) { return ''; }
+  }
+  static int _extractPort(String uri) {
     try {
-      if (config.contains('://')) {
-        String uri = config.split('#')[0]; // Remove remark
-        Uri parsed = Uri.parse(uri);
-        return parsed.host;
-      }
-    } catch (e) {
-      // Fallback parsing
-      try {
-        if (config.contains('@') && config.contains(':')) {
-          String afterAt = config.split('@')[1];
-          return afterAt.split(':')[0].split('?')[0].split('#')[0];
-        }
-      } catch (e2) {}
+      final u = Uri.parse(uri.split('#').first);
+      if (u.port > 0) return u.port;
+      final qp = u.queryParameters;
+      // default: tls -> 443, ws/http -> 80 else -> 443
+      final type = qp['type'] ?? 'tcp';
+      final security = qp['security'] ?? 'tls';
+      return security == 'tls' ? 443 : (type == 'ws' ? 80 : 443);
+    } catch (_) { return 443; }
+  }
+  static String _extractName(String uri) {
+    if (uri.contains('#')) {
+      final tail = uri.split('#').last;
+      try { return Uri.decodeComponent(tail); } catch (_) { return tail; }
     }
-    return '';
+    return _extractHost(uri);
   }
-  
-  // Extract port from config
-  static int _extractPort(String config) {
-    try {
-      if (config.contains('://')) {
-        String uri = config.split('#')[0]; // Remove remark
-        Uri parsed = Uri.parse(uri);
-        return parsed.port > 0 ? parsed.port : 443;
-      }
-    } catch (e) {
-      // Fallback parsing
-      try {
-        if (config.contains('@') && config.contains(':')) {
-          String afterAt = config.split('@')[1];
-          if (afterAt.contains(':')) {
-            String portStr = afterAt.split(':')[1].split('?')[0].split('#')[0];
-            return int.tryParse(portStr) ?? 443;
-          }
-        }
-      } catch (e2) {}
-    }
-    return 443;
-  }
-  
-  // Extract server name from config
-  static String _extractServerName(String config) {
-    try {
-      if (config.contains('#')) {
-        String name = config.split('#').last;
-        try {
-          return Uri.decodeComponent(name);
-        } catch (e) {
-          return name;
-        }
-      }
-      return _extractHost(config);
-    } catch (e) {
-      return 'Unknown';
-    }
-  }
-  
-  // Get protocol type from config string
-  static String _getProtocol(String config) {
-    if (config.toLowerCase().startsWith('vless://')) return 'VLESS';
-    if (config.toLowerCase().startsWith('vmess://')) return 'VMESS';
-    if (config.toLowerCase().startsWith('trojan://')) return 'Trojan';
-    if (config.toLowerCase().startsWith('ss://')) return 'Shadowsocks';
-    return 'Unknown';
-  }
-  
-  // FIXED V2Ray JSON configuration generator - THIS ROUTES ALL TRAFFIC
+
+  // Generate a PROPER V2Ray JSON config for VLESS
   static String generateV2RayConfig(String vlessUri) {
     try {
-      print('Generating V2Ray config from: ${vlessUri.substring(0, min(50, vlessUri.length))}...');
-      
-      // Parse VLESS URI
-      String cleanUri = vlessUri.split('#')[0];
-      Uri uri = Uri.parse(cleanUri);
-      String uuid = uri.userInfo;
-      String address = uri.host;
-      int port = uri.port > 0 ? uri.port : 443;
-      
-      // Parse query parameters
-      Map<String, String> params = uri.queryParameters;
-      String type = params['type'] ?? 'tcp';
-      String security = params['security'] ?? 'tls';
-      String sni = params['sni'] ?? address;
-      String fp = params['fp'] ?? 'chrome';
-      String encryption = params['encryption'] ?? 'none';
-      
-      print('Parsed: uuid=$uuid, address=$address, port=$port, type=$type, security=$security');
-      
-      // Build COMPLETE V2Ray config that ACTUALLY ROUTES TRAFFIC
-      String jsonConfig = '''
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "dns": {
-    "servers": ["8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1"]
-  },
-  "routing": {
-    "domainStrategy": "IPIfNonMatch",
-    "rules": [
-      {
-        "type": "field",
-        "outboundTag": "direct",
-        "ip": ["geoip:private"]
-      },
-      {
-        "type": "field",
-        "outboundTag": "proxy",
-        "network": "tcp,udp"
-      }
-    ]
-  },
-  "inbounds": [
-    {
-      "port": 10808,
-      "protocol": "socks",
-      "listen": "127.0.0.1",
-      "settings": {
-        "auth": "noauth",
-        "udp": true,
-        "userLevel": 8
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls"]
-      },
-      "tag": "socks"
-    },
-    {
-      "port": 10809,
-      "protocol": "http",
-      "listen": "127.0.0.1",
-      "settings": {
-        "userLevel": 8
-      },
-      "tag": "http"
-    }
-  ],
-  "outbounds": [
-    {
-      "protocol": "vless",
-      "settings": {
-        "vnext": [
+      final u = Uri.parse(vlessUri.split('#').first);
+      final qp = u.queryParameters;
+
+      final uuid = u.userInfo;
+      final address = u.host;
+      final port = u.port > 0 ? u.port : _defaultPortFor(qp);
+      final type = (qp['type'] ?? 'tcp').toLowerCase();
+      final security = (qp['security'] ?? 'tls').toLowerCase();
+
+      final sni = qp['sni'] ?? qp['serverName'] ?? address;
+      final alpn = qp['alpn']; // e.g., "h2,http/1.1"
+      final path = qp['path'] ?? '/';
+      final hostHeader = qp['host']; // ws/http Host header
+      final headerType = qp['headerType']; // 'http' for tcp/http header
+      final serviceName = qp['serviceName']; // grpc
+
+      final Map<String, dynamic> config = {
+        "log": {"loglevel": "warning"},
+        "dns": {
+          "servers": ["8.8.8.8", "1.1.1.1"]
+        },
+        "routing": {
+          "domainStrategy": "AsIs",
+          "rules": [
+            // Keep private IPs direct if you prefer; or comment to route 100% through proxy
+            // {"type": "field", "ip": ["geoip:private"], "outboundTag": "direct"}
+          ]
+        },
+        "inbounds": [
           {
-            "address": "$address",
-            "port": $port,
-            "users": [
-              {
-                "id": "$uuid",
-                "encryption": "$encryption",
-                "flow": "",
-                "level": 8
-              }
-            ]
+            "port": 10808,
+            "protocol": "socks",
+            "listen": "127.0.0.1",
+            "settings": {"auth": "noauth", "udp": true},
+            "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
+          }
+        ],
+        "outbounds": [
+          {
+            "protocol": "vless",
+            "tag": "proxy",
+            "settings": {
+              "vnext": [
+                {
+                  "address": address,
+                  "port": port,
+                  "users": [
+                    {"id": uuid, "encryption": "none", "level": 0}
+                  ]
+                }
+              ]
+            },
+            "streamSettings": {
+              "network": type,
+              "security": security
+            }
+          },
+          {
+            "protocol": "freedom",
+            "tag": "direct",
+            "settings": {}
+          },
+          {
+            "protocol": "blackhole",
+            "tag": "block",
+            "settings": {}
           }
         ]
-      },
-      "streamSettings": {
-        "network": "$type",
-        "security": "$security"${security == 'tls' ? ''',
-        "tlsSettings": {
-          "serverName": "$sni",
+      };
+
+      final outbound = config['outbounds'][0] as Map<String, dynamic>;
+      final stream = outbound['streamSettings'] as Map<String, dynamic>;
+
+      if (security == 'tls') {
+        final tls = {
+          "serverName": sni,
           "allowInsecure": true,
-          "alpn": ["h2", "http/1.1"],
-          "fingerprint": "$fp"
-        }''' : ''}${type == 'ws' ? ''',
-        "wsSettings": {
-          "path": "${params['path'] ?? '/'}",
-          "headers": {
-            "Host": "${params['host'] ?? address}"
-          }
-        }''' : ''}${type == 'grpc' ? ''',
-        "grpcSettings": {
-          "serviceName": "${params['serviceName'] ?? ''}",
-          "multiMode": false
-        }''' : ''}
-      },
-      "tag": "proxy",
-      "mux": {
-        "enabled": false,
-        "concurrency": 8
+        };
+        if (alpn != null && alpn.isNotEmpty) {
+          tls["alpn"] = alpn.split(',').map((s) => s.trim()).toList();
+        }
+        stream["tlsSettings"] = tls;
+      } else {
+        // security 'none' -> do nothing
       }
-    },
-    {
-      "protocol": "freedom",
-      "settings": {},
-      "tag": "direct"
-    },
-    {
-      "protocol": "blackhole",
-      "settings": {},
-      "tag": "block"
-    }
-  ]
-}
-''';
-      
-      // Clean up the JSON (remove empty lines and extra spaces)
-      jsonConfig = jsonConfig.replaceAll(RegExp(r'\n\s*\n'), '\n');
-      
-      print('Generated V2Ray config length: ${jsonConfig.length}');
+
+      if (type == 'ws') {
+        stream["wsSettings"] = {
+          "path": path,
+          if (hostHeader != null && hostHeader.isNotEmpty)
+            "headers": {"Host": hostHeader}
+        };
+      } else if (type == 'grpc') {
+        stream["grpcSettings"] = {
+          "serviceName": serviceName ?? ""
+        };
+      } else if (type == 'tcp') {
+        if (headerType == 'http') {
+          stream["tcpSettings"] = {
+            "header": {
+              "type": "http",
+              "request": {
+                "version": "1.1",
+                "method": "GET",
+                "path": [path],
+                "headers": {
+                  if (hostHeader != null && hostHeader.isNotEmpty)
+                    "Host": [hostHeader],
+                  "User-Agent": [
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                  ],
+                  "Accept-Encoding": ["gzip, deflate"],
+                  "Connection": ["keep-alive"],
+                  "Pragma": "no-cache"
+                }
+              }
+            }
+          };
+        }
+      }
+
+      final jsonConfig = jsonEncode(config);
+      debugPrint('Generated V2Ray JSON length: ${jsonConfig.length}');
       return jsonConfig;
-      
-    } catch (e, stack) {
-      print('Error generating V2Ray config: $e');
-      print('Stack trace: $stack');
+    } catch (e, st) {
+      debugPrint('generateV2RayConfig error: $e\n$st');
       return '';
     }
   }
-  
-  // Connect to VPN - FIXED to properly change servers
-  static Future<bool> connect(String vlessUri, {int? ping}) async {
+
+  static int _defaultPortFor(Map<String, String> qp) {
+    final type = (qp['type'] ?? 'tcp').toLowerCase();
+    final security = (qp['security'] ?? 'tls').toLowerCase();
+    if (security == 'tls') return 443;
+    if (type == 'ws') return 80;
+    return 443;
+  }
+
+  static Future<bool> connect(String vlessUri) async {
+    if (kIsWeb || !Platform.isAndroid) return false;
     try {
-      // If already connected to a different server, disconnect first
-      if (isConnected && currentConnectedConfig != vlessUri) {
-        print('Disconnecting from current server to switch...');
-        await disconnect();
-        await Future.delayed(Duration(seconds: 1));
+      debugPrint('Requesting VPN permission...');
+      await flutterV2ray.requestPermission();
+
+      final jsonConfig = generateV2RayConfig(vlessUri);
+      if (jsonConfig.isEmpty) {
+        debugPrint('Failed to generate JSON config'); return false;
       }
-      
-      currentConnectedConfig = vlessUri;
-      currentConnectedPing = ping;
-      
-      // Real V2Ray connection for Android
-      if (!kIsWeb && Platform.isAndroid) {
-        try {
-          print('Requesting VPN permission...');
-          
-          // Request VPN permission
-          await flutterV2ray.requestPermission();
-          
-          // Generate proper V2Ray JSON configuration
-          print('Generating V2Ray JSON config...');
-          String jsonConfig = generateV2RayConfig(vlessUri);
-          
-          if (jsonConfig.isEmpty) {
-            print('Failed to generate proper V2Ray config');
-            currentConnectedConfig = null;
-            currentConnectedPing = null;
-            return false;
-          }
-          
-          print('Starting V2Ray with JSON config...');
-          
-          // Start V2Ray with the JSON config
-          await flutterV2ray.startV2Ray(
-            remark: "AsadVPN",
-            config: jsonConfig,
-            bypassSubnets: [], // Empty to route ALL traffic through VPN
-          );
-          
-          print('V2Ray started, waiting for connection...');
-          
-          // Wait a bit for connection to establish
-          await Future.delayed(Duration(seconds: 2));
-          
-          // Simply assume connected if no exception was thrown
-          print('VPN Connected successfully!');
-          isConnected = true;
-          connectionStreamController.add(true);
-          startBackgroundScanning();
-          
-          // Save last config
-          final prefs = await SharedPreferences.getInstance();
-          await prefs.setString('last_config', vlessUri);
-          
-          return true;
-          
-        } catch (e) {
-          print('V2Ray connection error: $e');
-          currentConnectedConfig = null;
-          currentConnectedPing = null;
-          
-          // Try to stop V2Ray if error occurred
-          try {
-            await flutterV2ray.stopV2Ray();
-          } catch (_) {}
-          
-          return false;
-        }
-      }
-      
-      // Web fallback simulation
-      if (kIsWeb) {
-        await Future.delayed(Duration(seconds: 2));
-        isConnected = true;
-        connectionStreamController.add(true);
-        startBackgroundScanning();
-        return true;
-      }
-      
-      return false;
+
+      debugPrint('Starting V2Ray with JSON config...');
+      await flutterV2ray.startV2Ray(
+        remark: 'AsadVPN',
+        config: jsonConfig,
+        // Empty list => do not bypass local subnets. Route all traffic.
+        bypassSubnets: const [],
+      );
+
+      isConnected = true;
+      startBackgroundScanning();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('last_config', vlessUri);
+      return true;
     } catch (e) {
-      print('Connection error: $e');
-      currentConnectedConfig = null;
-      currentConnectedPing = null;
+      debugPrint('V2Ray connection error: $e');
       return false;
     }
   }
-  
-  // Disconnect VPN
+
   static Future<void> disconnect() async {
     try {
-      backgroundScanTimer?.cancel();
-      backgroundScanTimer = null;
-      
+      backgroundScanTimer?.cancel(); backgroundScanTimer = null;
       if (!kIsWeb && Platform.isAndroid) {
-        try {
-          // Stop V2Ray
-          await flutterV2ray.stopV2Ray();
-        } catch (e) {
-          print('V2Ray disconnect error: $e');
-        }
+        try { await flutterV2ray.stopV2Ray(); } catch (e) { debugPrint('stop error: $e'); }
       }
-      
-      await Future.delayed(Duration(milliseconds: 500));
       isConnected = false;
-      currentConnectedConfig = null;
-      currentConnectedPing = null;
-      connectionStreamController.add(false);
       fastestServers.clear();
       allPingableServers.clear();
       serversStreamController.add([]);
     } catch (e) {
-      print('Disconnect error: $e');
+      debugPrint('Disconnect error: $e');
     }
   }
-  
-  // Cleanup
+
   static void dispose() {
     backgroundScanTimer?.cancel();
     serversStreamController.close();
-    connectionStreamController.close();
   }
 }

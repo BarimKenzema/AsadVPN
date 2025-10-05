@@ -8,9 +8,10 @@
     <uses-permission android:name="android.permission.CAMERA"/>
 
     <application
-        android:name=".App"
+        android:name="${applicationName}"
         android:label="AsadVPN"
         android:icon="@mipmap/ic_launcher">
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -21,17 +22,19 @@
             android:windowSoftInputMode="adjustResize">
             <meta-data
               android:name="io.flutter.embedding.android.NormalTheme"
-              android:resource="@style/NormalTheme" />
+              android:resource="@style/NormalTheme"/>
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
 
+        <!-- flutter_v2ray VPN service -->
         <service
-            android:name=".SingBoxVpnService"
+            android:name="com.github.blueboytm.flutter_v2ray.v2ray.services.V2rayVPNService"
+            android:exported="false"
             android:permission="android.permission.BIND_VPN_SERVICE"
-            android:exported="false">
+            android:foregroundServiceType="vpn">
             <intent-filter>
                 <action android:name="android.net.VpnService"/>
             </intent-filter>
@@ -39,4 +42,10 @@
 
         <meta-data android:name="flutterEmbedding" android:value="2" />
     </application>
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
 </manifest>
