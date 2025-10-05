@@ -33,9 +33,11 @@
         <service
             android:name="com.github.blueboytm.flutter_v2ray.v2ray.services.V2rayVPNService"
             android:exported="false"
-            android:permission="android.permission.BIND_VPN_SERVICE"
-            android:foregroundServiceType="vpn|specialUse">
-            <!-- FIX IS HERE: Android 14 requires this for VPN -->
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter>
+                <action android:name="android.net.VpnService"/>
+            </intent-filter>
+            <!-- FIX IS HERE: Android 14 requires this property tag for VPN services -->
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="vpn" />
         </service>
