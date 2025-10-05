@@ -22,11 +22,9 @@ class ServerInfo {
 }
 
 class VPNService {
-  // Use the new V2ray object from the plugin
   static final V2ray v2ray = V2ray(
     onStatusChanged: (status) {
-      isConnected = status.state == 'CONNECTED';
-      debugPrint('V2Ray status: ${status.state}');
+      _updateConnectionState(status);
     },
   );
 
@@ -36,18 +34,29 @@ class VPNService {
   static List<String> configServers = [];
   static List<ServerInfo> fastestServers = [];
   static bool isScanning = false;
+  static String? currentConnectedConfig;
+  static int? currentConnectedPing;
 
-  static StreamController<List<ServerInfo>> serversStreamController =
+  static final StreamController<List<ServerInfo>> serversStreamController =
       StreamController<List<ServerInfo>>.broadcast();
+  static final StreamController<bool> connectionStateController =
+      StreamController<bool>.broadcast();
+
+  static void _updateConnectionState(V2RayStatus status) {
+    final newIsConnected = status.state == 'CONNECTED';
+    if (isConnected != newIsConnected) {
+      isConnected = newIsConnected;
+      connectionStateController.add(isConnected);
+      debugPrint('V2Ray status changed: ${status.state}');
+    }
+  }
 
   static Future<void> init() async {
     try {
-      // Initialize the new plugin
       await v2ray.initialize(
         notificationIconResourceName: "ic_launcher",
         notificationIconResourceType: "mipmap",
       );
-      
       final prefs = await SharedPreferences.getInstance();
       currentSubscriptionLink = prefs.getString('subscription_link');
       if (currentSubscriptionLink != null && currentSubscriptionLink!.isNotEmpty) {
@@ -117,7 +126,7 @@ class VPNService {
     final shuffled = List<String>.from(configServers)..shuffle(Random());
     final batch = shuffled.take(min(10, shuffled.length)).toList();
 
-    final tests = batch.map((cfg) => _testServerWithPing(cfg, 3)).toList();
+    final tests = batch.map((cfg) => _testServerWithPing(cfg)).toList();
     final results = await Future.wait(tests);
 
     final working = results.whereType<ServerInfo>().toList()..sort((a, b) => a.ping.compareTo(b.ping));
@@ -126,51 +135,44 @@ class VPNService {
     isScanning = false;
 
     if (working.isNotEmpty) {
-      return {
-        'success': true,
-        'server': working.first.config,
-        'ping': working.first.ping
-      };
+      return {'success': true, 'server': working.first.config, 'ping': working.first.ping};
     }
     return {'success': false, 'error': 'No working servers'};
   }
 
-  static Future<ServerInfo?> _testServerWithPing(String uri, int timeoutSec) async {
+  static Future<ServerInfo?> _testServerWithPing(String uri) async {
     try {
-      // Use the plugin's built-in delay checker
       final parser = V2ray.parseFromURL(uri);
       final delay = await v2ray.getServerDelay(config: parser.getFullConfiguration());
 
       if (delay != -1) {
-        return ServerInfo(
-          config: uri,
-          protocol: 'VLESS',
-          ping: delay,
-          name: parser.remark,
-        );
+        return ServerInfo(config: uri, protocol: 'VLESS', ping: delay, name: parser.remark);
       }
       return null;
     } catch (e) {
-      debugPrint("Ping test failed for $uri: $e");
       return null;
     }
   }
   
-  static Future<bool> connect(String vlessUri) async {
+  static Future<bool> connect({required String vlessUri, int? ping}) async {
     if (kIsWeb || !Platform.isAndroid) return false;
     try {
-      // Use the plugin's built-in parser
+      if (isConnected) {
+        await disconnect();
+        await Future.delayed(const Duration(milliseconds: 500)); // Give time for disconnection
+      }
+      
       final parser = V2ray.parseFromURL(vlessUri);
       
-      // Request permission if needed
       if (await v2ray.requestPermission()) {
         await v2ray.startV2Ray(
           remark: parser.remark,
           config: parser.getFullConfiguration(),
           proxyOnly: false,
-          bypassSubnets: [], // Route all traffic
+          bypassSubnets: [],
         );
-        isConnected = true;
+        currentConnectedConfig = vlessUri;
+        currentConnectedPing = ping;
         return true;
       }
       return false;
@@ -183,11 +185,15 @@ class VPNService {
   static Future<void> disconnect() async {
     try {
       await v2ray.stopV2Ray();
-      isConnected = false;
-      fastestServers.clear();
-      serversStreamController.add([]);
     } catch (e) {
       debugPrint('Disconnect error: $e');
+    } finally {
+      isConnected = false;
+      currentConnectedConfig = null;
+      currentConnectedPing = null;
+      fastestServers.clear();
+      serversStreamController.add([]);
+      connectionStateController.add(false);
     }
   }
 }
