@@ -51,14 +51,26 @@ android {
         versionName flutterVersionName
     }
 
+    splits {
+        abi {
+            enable true
+            reset()
+            include "x86_64", "armeabi-v7a", "arm64-v8a"
+            universalApk true
+        }
+    }
+
     buildTypes {
         release {
             signingConfig signingConfigs.debug
             
-            minifyEnabled true
-            shrinkResources true
-            
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Disable shrinking for now to ensure stability.
+            minifyEnabled false
+            shrinkResources false
+
+            ndk {
+                abiFilters "x86_64", "armeabi-v7a", "arm64-v8a"
+            }
         }
     }
 }
@@ -69,6 +81,4 @@ flutter {
 
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
-    // FIX IS HERE: Explicitly include the Play Core library
-    implementation 'com.google.android.play:core:1.10.3'
 }
