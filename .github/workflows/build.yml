@@ -27,13 +27,12 @@ jobs:
 
       - name: Clean project
         run: flutter clean
+      
+      - name: Show pubspec.yaml content
+        run: cat pubspec.yaml
 
-      # FIX IS HERE: Repair the pub cache to force a fresh download
-      - name: Repair Pub Cache
-        run: flutter pub cache repair
-
-      - name: Get Flutter dependencies
-        run: flutter pub get
+      - name: Get Flutter dependencies with verbose logging
+        run: flutter pub get --verbose
 
       - name: Build APK
         run: flutter build apk --release
