@@ -11,7 +11,7 @@ void main() => runApp(AsadVPNApp());
 
 class AsadVPNApp extends StatefulWidget {
   @override
-  State<AsadVPNApp> createState() => _AsadVPNAppState();
+  _AsadVPNAppState createState() => _AsadVPNAppState();
 }
 
 class _AsadVPNAppState extends State<AsadVPNApp> {
@@ -45,7 +45,7 @@ class VPNHomePage extends StatefulWidget {
   const VPNHomePage({required this.onLanguageChanged, Key? key}) : super(key: key);
 
   @override
-  State<VPNHomePage> createState() => _VPNHomePageState();
+  _VPNHomePageState createState() => _VPNHomePageState();
 }
 
 class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
@@ -66,7 +66,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
     });
 
     connectionSub = VPNService.connectionStateController.stream.listen((connected) {
-      if (mounted) _updateStatus();
+      if (mounted) _updateConnectionStatus();
     });
   }
 
@@ -80,29 +80,33 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _updateStatus();
-  }
-
-  Future<void> _initialize() async {
-    await VPNService.init();
-    if (!VPNService.isSubscriptionValid && mounted) {
-      _showSubscriptionDialog();
-    } else {
-      _updateStatus();
+    if (state == AppLifecycleState.resumed) {
+      _updateConnectionStatus();
     }
   }
 
-  void _updateStatus() {
+  void _updateConnectionStatus() {
     final l10n = AppLocalizations.of(context);
-    if (!mounted) return;
     setState(() {
       if (VPNService.isConnected) {
-        status = '${l10n?.connected ?? 'Connected'}'
-            '${VPNService.currentConnectedPing != null ? ' (${VPNService.currentConnectedPing}ms)' : ''}';
+        status = l10n?.connected ?? 'Connected';
+        if (VPNService.currentConnectedPing != null) {
+          status += ' (${VPNService.currentConnectedPing}ms)';
+        }
       } else {
         status = l10n?.disconnected ?? 'Disconnected';
       }
     });
+  }
+
+  Future<void> _initialize() async {
+    await VPNService.init();
+    if (!mounted) return;
+    if (!VPNService.isSubscriptionValid) {
+      _showSubscriptionDialog();
+    } else {
+      _updateConnectionStatus();
+    }
   }
 
   Future<void> _toggleConnection() async {
@@ -116,42 +120,19 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
       });
 
       final result = await VPNService.scanAndSelectBestServer();
-      if (mounted) {
-        if (result['success'] == true) {
-          await _connectToServer(
-              ServerInfo(config: result['server'], ping: result['ping'], name: '', protocol: ''));
-        } else {
-          setState(() {
-            isConnecting = false;
-            status = l10n?.noServers ?? 'No servers available';
-          });
-        }
+      if (!mounted) return;
+
+      if (result['success'] == true) {
+        await VPNService.connect(vlessUri: result['server'], ping: result['ping']);
+      } else {
+        setState(() {
+          status = l10n?.noServers ?? 'No servers available';
+        });
       }
+      setState(() => isConnecting = false);
     }
   }
 
-  Future<void> _connectToServer(ServerInfo server) async {
-    final l10n = AppLocalizations.of(context);
-    if (!mounted) return;
-    setState(() {
-      isConnecting = true;
-      status = l10n?.connecting ?? 'A Moment Please...';
-    });
-
-    final ok = await VPNService.connect(server.config, ping: server.ping);
-
-    if (mounted) {
-      setState(() {
-        isConnecting = false;
-        if (ok) {
-          status = '${l10n?.connected ?? 'Connected'} (${server.ping}ms)';
-        } else {
-          status = 'Connection failed';
-        }
-      });
-    }
-  }
-  
   void _showSubscriptionDialog() {
     final controller = TextEditingController();
     showDialog(
@@ -173,10 +154,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
             const SizedBox(height: 16),
             ElevatedButton.icon(
               onPressed: () async {
-                final result = await Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => QRScannerPage()),
-                );
+                final result = await Navigator.push(context, MaterialPageRoute(builder: (_) => QRScannerPage()));
                 if (result != null) controller.text = result;
               },
               icon: const Icon(Icons.qr_code_scanner),
@@ -199,7 +177,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                 final ok = await VPNService.saveSubscriptionLink(controller.text);
                 if (ok) {
                   Navigator.pop(ctx);
-                  _updateStatus();
+                  _updateConnectionStatus();
                   ScaffoldMessenger.of(context).showSnackBar(SnackBar(
                     content: Text(AppLocalizations.of(context)?.subscriptionActivated ?? 'Subscription activated!'),
                     backgroundColor: Colors.green,
@@ -217,6 +195,16 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
         ],
       ),
     );
+  }
+
+  Future<void> _connectToServer(ServerInfo server) async {
+    setState(() {
+      isConnecting = true;
+      status = AppLocalizations.of(context)?.connecting ?? 'A Moment Please...';
+    });
+    await VPNService.connect(vlessUri: server.config, ping: server.ping);
+    if (!mounted) return;
+    setState(() => isConnecting = false);
   }
 
   @override
@@ -250,23 +238,26 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text('AsadVPN', style: const TextStyle(fontSize: 36, fontWeight: FontWeight.bold, color: Colors.white)),
-                const Text('UNLIMITED', style: TextStyle(fontSize: 14, color: Colors.grey)),
+                Text(l10n?.appTitle ?? 'AsadVPN', style: const TextStyle(fontSize: 36, fontWeight: FontWeight.bold, color: Colors.white)),
+                Text(l10n?.unlimited ?? 'UNLIMITED', style: const TextStyle(fontSize: 14, color: Colors.grey)),
                 const SizedBox(height: 50),
                 GestureDetector(
                   onTap: (!VPNService.isSubscriptionValid || isConnecting) ? null : _toggleConnection,
                   child: Container(
-                    width: 150, height: 150,
+                    width: 150,
+                    height: 150,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       gradient: LinearGradient(
                         colors: VPNService.isConnected ? [Colors.green, Colors.greenAccent] : [Colors.red, Colors.redAccent],
-                        begin: Alignment.topLeft, end: Alignment.bottomRight,
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
                       ),
                       boxShadow: [
                         BoxShadow(
                           color: (VPNService.isConnected ? Colors.green : Colors.red).withOpacity(0.5),
-                          blurRadius: 20, spreadRadius: 5,
+                          blurRadius: 20,
+                          spreadRadius: 5,
                         ),
                       ],
                     ),
@@ -278,7 +269,10 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                           if (VPNService.isConnected)
                             Padding(
                               padding: const EdgeInsets.only(top: 8),
-                              child: Text(l10n?.disconnect ?? 'Disconnect', style: const TextStyle(color: Colors.white, fontSize: 12)),
+                              child: Text(
+                                l10n?.disconnect ?? 'Disconnect',
+                                style: const TextStyle(color: Colors.white, fontSize: 12),
+                              ),
                             ),
                         ],
                       ),
@@ -286,7 +280,10 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                   ),
                 ),
                 const SizedBox(height: 30),
-                Text(isConnecting ? (l10n?.connecting ?? 'A Moment Please...') : status, style: const TextStyle(fontSize: 18, color: Colors.white70)),
+                Text(
+                  isConnecting ? (l10n?.connecting ?? 'A Moment Please...') : status,
+                  style: const TextStyle(fontSize: 18, color: Colors.white70),
+                ),
                 if (isConnecting)
                   const Padding(
                     padding: EdgeInsets.only(top: 20),
@@ -332,7 +329,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                   child: displayServers.isEmpty
                       ? Center(
                           child: Text(
-                            VPNService.isConnected ? (l10n?.scanningServers ?? 'Scanning...') : (l10n?.noServers ?? 'No servers available'),
+                            VPNService.isConnected ? (l10n?.scanningServers ?? 'Scanning servers...') : (l10n?.noServers ?? 'No servers available'),
                             style: const TextStyle(color: Colors.grey, fontSize: 14),
                           ),
                         )
@@ -353,7 +350,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                                     color: Colors.green.withOpacity(0.2),
                                     borderRadius: BorderRadius.circular(4),
                                   ),
-                                  child: Text(server.protocol, style: const TextStyle(fontSize: 10, color: Colors.green, fontWeight: FontWeight.bold)),
+                                  child: const Text('VLESS', style: TextStyle(fontSize: 10, color: Colors.green, fontWeight: FontWeight.bold)),
                                 ),
                                 title: Text(
                                   server.name,
@@ -370,7 +367,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                                     Text('${server.ping}ms', style: const TextStyle(color: Colors.grey, fontSize: 12)),
                                   ],
                                 ),
-                                onTap: isConnecting ? null : () => _connectToServer(server),
+                                onTap: (isConnecting || isCurrent) ? null : () => _connectToServer(server),
                               ),
                             );
                           },
