@@ -28,54 +28,27 @@ jobs:
       - name: Disable analytics
         run: flutter config --no-analytics
 
-      - name: Clean everything
+      - name: Clean caches
         run: |
           flutter clean
-          rm -rf pubspec.lock
-          rm -rf .dart_tool
-          rm -rf ~/.pub-cache/git/
+          rm -rf pubspec.lock .dart_tool
+          rm -rf ~/.pub-cache/hosted/pub.dev/flutter_v2ray-*
+          rm -rf ~/.pub-cache/git/*
 
       - name: Show pubspec.yaml content
         run: |
-          echo "=== PUBSPEC.YAML CONTENT ==="
+          echo "=== PUBSPEC.YAML ==="
           cat pubspec.yaml
 
       - name: Get dependencies (verbose)
         run: flutter pub get -v
 
-      - name: Debug - Check what was downloaded
+      - name: Verify flutter_v2ray is from Git (not pub.dev)
         run: |
-          echo "=== CHECKING IF FLUTTER_V2RAY EXISTS ==="
-          
-          echo "--- In pubspec.lock ---"
-          if [ -f "pubspec.lock" ]; then
-            grep -A20 "flutter_v2ray:" pubspec.lock || echo "NOT FOUND in pubspec.lock!"
-          fi
-          
-          echo "--- In .dart_tool/package_config.json ---"
-          if [ -f ".dart_tool/package_config.json" ]; then
-            cat .dart_tool/package_config.json | python3 -m json.tool | grep -A5 "flutter_v2ray" || echo "NOT FOUND in package_config.json!"
-          fi
-          
-          echo "--- Flutter pub deps output ---"
-          flutter pub deps | grep flutter_v2ray || echo "NOT FOUND in deps!"
-          
-          echo "--- Git cache ---"
-          ls -la ~/.pub-cache/git/ || echo "No git cache"
-          
-          echo "--- Check if V2ray class exists in cached package ---"
-          find ~/.pub-cache/git -name "flutter_v2ray.dart" -exec grep -l "class V2ray" {} \; || echo "V2ray class not found in cache"
-
-      - name: Try importing manually to test
-        run: |
-          echo "=== Testing import ==="
-          cat > test_import.dart << 'EOF'
-          import 'package:flutter_v2ray/flutter_v2ray.dart';
-          void main() {
-            print('Import successful');
-          }
-          EOF
-          dart test_import.dart || echo "Import failed"
+          echo "--- pubspec.lock ---"
+          grep -A20 "flutter_v2ray:" pubspec.lock || true
+          echo "--- package_config.json ---"
+          cat .dart_tool/package_config.json | python3 -m json.tool | grep -A5 -B2 "flutter_v2ray" || true
 
       - name: Build APK
         run: flutter build apk --release
