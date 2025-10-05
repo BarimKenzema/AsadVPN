@@ -34,7 +34,10 @@ jobs:
         run: |
           set -eux
           sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;25.1.8937393"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.1.8937393" >> $GITHUB_ENV
+          ls -lah $ANDROID_SDK_ROOT/ndk/ || true
 
       - name: Set up Go 1.24.x
         uses: actions/setup-go@v5
@@ -44,6 +47,8 @@ jobs:
       - name: Build libbox.aar via gomobile
         shell: bash
         env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
           set -eux
@@ -51,16 +56,18 @@ jobs:
           export GO111MODULE=on
 
           go version
-          gomobile version || true || echo "gomobile not installed yet"
 
+          # Install gomobile & gobind
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
-          gomobile version || true
 
-          gomobile init -ndk "$ANDROID_NDK_HOME"
+          # Initialize gomobile (no -ndk; it will find NDK via env)
+          gomobile init
 
+          # Clone sing-box source (stable tag)
           git clone --depth 1 --branch v1.12.8 https://github.com/SagerNet/sing-box.git sing-box-src
 
+          # Build libbox AAR
           mkdir -p android/app/libs
           cd sing-box-src/experimental/libbox
           gomobile bind -target=android -javapkg io.nekohasekai.libbox -o "$GITHUB_WORKSPACE/android/app/libs/libbox.aar"
