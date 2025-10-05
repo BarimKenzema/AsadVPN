@@ -25,11 +25,13 @@ jobs:
           flutter-version: '3.19.0'
           cache: true
 
-      - name: Clean Flutter and Pub Cache
-        run: |
-          flutter clean
-          flutter pub cache clean --all
-      
+      - name: Clean project
+        run: flutter clean
+
+      # FIX IS HERE: Repair the pub cache to force a fresh download
+      - name: Repair Pub Cache
+        run: flutter pub cache repair
+
       - name: Get Flutter dependencies
         run: flutter pub get
 
