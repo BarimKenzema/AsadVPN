@@ -23,6 +23,13 @@ dependencies:
       url: https://github.com/CuleFlaco/flutter_v2ray.git
       ref: main
 
+# ADD THIS SECTION - Forces Flutter to use your fork
+dependency_overrides:
+  flutter_v2ray:
+    git:
+      url: https://github.com/CuleFlaco/flutter_v2ray.git
+      ref: main
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
