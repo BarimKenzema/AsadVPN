@@ -1,25 +1,12 @@
 def localProperties = new Properties()
 def localPropertiesFile = rootProject.file('local.properties')
 if (localPropertiesFile.exists()) {
-    localPropertiesFile.withReader('UTF-8') { reader ->
-        localProperties.load(reader)
-    }
+    localPropertiesFile.withReader('UTF-8') { reader -> localProperties.load(reader) }
 }
-
-def flutterRoot = localProperties.getProperty('flutter.sdk')
-if (flutterRoot == null) {
-    throw new GradleException("Flutter SDK not found. Define location with flutter.sdk in the local.properties file.")
-}
-
-def flutterVersionCode = localProperties.getProperty('flutter.versionCode')
-if (flutterVersionCode == null) {
-    flutterVersionCode = '1'
-}
-
-def flutterVersionName = localProperties.getProperty('flutter.versionName')
-if (flutterVersionName == null) {
-    flutterVersionName = '1.0'
-}
+def flutterRoot = localProperties.getProperty('flutter.sdk') ?: ''
+if (!flutterRoot) throw new GradleException("Flutter SDK not found.")
+def flutterVersionCode = localProperties.getProperty('flutter.versionCode') ?: '1'
+def flutterVersionName = localProperties.getProperty('flutter.versionName') ?: '1.0'
 
 apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
@@ -27,21 +14,13 @@ apply from: "$flutterRoot/packages/flutter_tools/gradle/flutter.gradle"
 
 android {
     compileSdkVersion 34
-    ndkVersion "27.0.12077973"
-
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
-    }
-
-    kotlinOptions {
-        jvmTarget = '1.8'
-    }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
+    kotlinOptions { jvmTarget = '1.8' }
 
     sourceSets {
-        main.java.srcDirs += 'src/main/kotlin'
         main {
-            jniLibs.srcDirs = ['src/main/jniLibs']
+            java.srcDirs += 'src/main/kotlin'
+            jniLibs.srcDirs = [] // use AAR’s native libs only
         }
     }
 
@@ -51,28 +30,28 @@ android {
         targetSdkVersion 34
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
+        multiDexEnabled true
     }
 
     buildTypes {
-        release {
-            signingConfig signingConfigs.debug
-        }
+        release { signingConfig signingConfigs.debug; minifyEnabled false }
+        debug { minifyEnabled false }
     }
-    
+
     packagingOptions {
-    pickFirst 'lib/arm64-v8a/libcore.so'
-    pickFirst 'lib/armeabi-v7a/libcore.so'
-    pickFirst 'lib/x86/libcore.so'
-    pickFirst 'lib/x86_64/libcore.so'
-}
-    
+        exclude 'META-INF/INDEX.LIST'
+        exclude 'META-INF/DEPENDENCIES'
+        pickFirst '**/libgojni.so'
+        pickFirst '**/libbox.so'
+        pickFirst '**/libcore.so'
+    }
+
     namespace 'com.asad.vpn'
 }
 
-flutter {
-    source '../..'
-}
+flutter { source '../..' }
 
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
+    implementation files('libs/libbox.aar')
 }
