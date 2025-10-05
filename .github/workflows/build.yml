@@ -22,12 +22,18 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      # Accept licenses (ignore Broken pipe after completion)
+      - name: Accept SDK licenses
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses || true
+
+      # Install required SDK packages (no piping; licenses already accepted)
       - name: Install Android SDK components
         shell: bash
         run: |
-          set -euxo pipefail
-          yes | sdkmanager --licenses
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;25.1.8937393" "cmdline-tools;latest"
+          set -eux
+          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;25.1.8937393"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.1.8937393" >> $GITHUB_ENV
 
       - name: Set up Go 1.24.x
@@ -40,38 +46,26 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
-          set -euxo pipefail
-          echo "Go version:"
+          set -eux
+          export PATH="$HOME/go/bin:$PATH"
+          export GO111MODULE=on
+
           go version
-          echo "Env:"
-          go env
+          gomobile version || true || echo "gomobile not installed yet"
 
-          # Ensure gomobile in PATH
-          export GOBIN="$HOME/go/bin"
-          export PATH="$GOBIN:$PATH"
-
-          # gomobile & gobind (use latest; Go 1.24 required)
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
           gomobile version || true
 
-          # Initialize gomobile with the NDK
           gomobile init -ndk "$ANDROID_NDK_HOME"
 
-          # Clone sing-box source (pin to a stable tag)
           git clone --depth 1 --branch v1.12.8 https://github.com/SagerNet/sing-box.git sing-box-src
 
-          # Build libbox AAR
           mkdir -p android/app/libs
           cd sing-box-src/experimental/libbox
+          gomobile bind -target=android -javapkg io.nekohasekai.libbox -o "$GITHUB_WORKSPACE/android/app/libs/libbox.aar"
 
-          # Some environments need GO111MODULE=on explicitly
-          export GO111MODULE=on
-
-          # Bind. -javapkg defines the Java/Kotlin package used by the AAR
-          gomobile bind -target=android -javapkg io.nekohasekai.libbox -o $GITHUB_WORKSPACE/android/app/libs/libbox.aar
-
-          ls -lah $GITHUB_WORKSPACE/android/app/libs/
+          ls -lah "$GITHUB_WORKSPACE/android/app/libs/"
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -80,11 +74,9 @@ jobs:
           channel: 'stable'
 
       - name: Flutter pub get
-        shell: bash
         run: flutter pub get
 
       - name: Build APK (release)
-        shell: bash
         run: flutter build apk --release
 
       - name: Upload APK
