@@ -25,14 +25,23 @@ jobs:
           flutter-version: '3.19.0'
           cache: true
 
+      - name: Disable analytics
+        run: flutter config --no-analytics
+
       - name: Clean project
         run: flutter clean
-      
+
       - name: Show pubspec.yaml content
         run: cat pubspec.yaml
 
       - name: Get Flutter dependencies with verbose logging
         run: flutter pub get --verbose
+
+      - name: Show resolved dependencies
+        run: flutter pub deps --style=compact
+
+      - name: Show package config
+        run: cat .dart_tool/package_config.json | sed 's/","/",\n"/g' | sed 's/},{/},\n{/g' | grep -i flutter_v2ray -n || true
 
       - name: Build APK
         run: flutter build apk --release
