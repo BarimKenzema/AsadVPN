@@ -28,12 +28,13 @@ jobs:
         run: |
           yes | sdkmanager --licenses || true
 
-      # Install required SDK packages (no piping; licenses already accepted)
+      # Install required SDK packages
       - name: Install Android SDK components
         shell: bash
         run: |
           set -eux
-          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;25.1.8937393"
+          # We need both a modern platform (build) and the API level gomobile will target (21)
+          sdkmanager --install "platform-tools" "platforms;android-34" "platforms;android-21" "build-tools;34.0.0" "ndk;25.1.8937393"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.1.8937393" >> $GITHUB_ENV
@@ -55,22 +56,20 @@ jobs:
           export PATH="$HOME/go/bin:$PATH"
           export GO111MODULE=on
 
-          go version
-
           # Install gomobile & gobind
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
 
-          # Initialize gomobile (no -ndk; it will find NDK via env)
+          # Initialize gomobile (no -ndk; it finds NDK via env)
           gomobile init
 
           # Clone sing-box source (stable tag)
           git clone --depth 1 --branch v1.12.8 https://github.com/SagerNet/sing-box.git sing-box-src
 
-          # Build libbox AAR
+          # Build libbox AAR targeting API 21 (>=19 required by NDK r25)
           mkdir -p android/app/libs
           cd sing-box-src/experimental/libbox
-          gomobile bind -target=android -javapkg io.nekohasekai.libbox -o "$GITHUB_WORKSPACE/android/app/libs/libbox.aar"
+          gomobile bind -target=android -androidapi 21 -javapkg io.nekohasekai.libbox -o "$GITHUB_WORKSPACE/android/app/libs/libbox.aar"
 
           ls -lah "$GITHUB_WORKSPACE/android/app/libs/"
 
