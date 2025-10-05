@@ -22,7 +22,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      # Accept SDK licenses (ignore Broken pipe after completion)
+      # Accept licenses (ignore Broken pipe)
       - name: Accept SDK licenses
         shell: bash
         run: |
@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           set -eux
-          # We need both a modern platform for Flutter build and API 21 for gomobile
+          # Need both modern platform (Flutter build) and API 21 for gomobile
           sdkmanager --install "platform-tools" "platforms;android-34" "platforms;android-21" "build-tools;34.0.0" "ndk;25.1.8937393"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
@@ -45,7 +45,7 @@ jobs:
         with:
           go-version: '1.24.x'
 
-      # Build libbox.aar via a pinned gomobile (use go run to pin version)
+      # Build libbox.aar via pinned gomobile (clone repo and checkout a pre-2025 commit)
       - name: Build libbox.aar via pinned gomobile
         shell: bash
         env:
@@ -54,28 +54,33 @@ jobs:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
         run: |
           set -eux
+          export PATH="$HOME/go/bin:$PATH"
           export GO111MODULE=on
 
-          # Pin gomobile to a known-good version that still includes the bind APIs gomobile expects.
-          # This avoids the "unable to import bind: no Go package in golang.org/x/mobile/bind".
-          GOMOBILE_VER=v0.0.0-20231002-5e0c301b3b9b
-
           go version
-          # Initialize gomobile (pinned). No -ndk flag; it discovers via env vars.
-          go run golang.org/x/mobile/cmd/gomobile@${GOMOBILE_VER} init
 
-          # Fetch sing-box source (stable tag)
+          # Clone golang/mobile and pin to a commit before 2025 (to keep bind location stable)
+          git clone https://github.com/golang/mobile.git gomobile-src
+          cd gomobile-src
+          PIN_COMMIT="$(git rev-list -n 1 --before='2024-06-01' origin/master)"
+          git checkout "$PIN_COMMIT"
+          echo "Pinned gomobile commit: $PIN_COMMIT"
+          # Install gomobile and gobind from this pinned source
+          go install ./cmd/gomobile
+          go install ./cmd/gobind
+          cd ..
+
+          # Verify gomobile is installed and init (no -ndk flag; discovers via env)
+          gomobile version || true
+          gomobile init
+
+          # Clone sing-box source (stable tag)
           git clone --depth 1 --branch v1.12.8 https://github.com/SagerNet/sing-box.git sing-box-src
 
           # Build libbox AAR targeting API 21 (>=19 required by NDK r25)
           mkdir -p android/app/libs
           cd sing-box-src/experimental/libbox
-
-          go run golang.org/x/mobile/cmd/gomobile@${GOMOBILE_VER} bind \
-            -target=android \
-            -androidapi 21 \
-            -javapkg io.nekohasekai.libbox \
-            -o "$GITHUB_WORKSPACE/android/app/libs/libbox.aar"
+          gomobile bind -target=android -androidapi 21 -javapkg io.nekohasekai.libbox -o "$GITHUB_WORKSPACE/android/app/libs/libbox.aar"
 
           ls -lah "$GITHUB_WORKSPACE/android/app/libs/"
 
