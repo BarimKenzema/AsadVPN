@@ -49,6 +49,9 @@ android {
         targetSdkVersion 34
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
+        
+        // Enable multidex
+        multiDexEnabled true
     }
 
     splits {
@@ -64,6 +67,7 @@ android {
         release {
             signingConfig signingConfigs.debug
             
+            // Disable shrinking to avoid dex errors
             minifyEnabled false
             shrinkResources false
 
@@ -80,4 +84,7 @@ flutter {
 
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib-jdk7:$kotlin_version"
+    
+    // Add multidex support
+    implementation 'androidx.multidex:multidex:2.0.1'
 }
