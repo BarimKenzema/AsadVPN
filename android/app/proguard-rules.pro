@@ -11,3 +11,6 @@
 -keep class go.** { *; }
 -keep class libv2ray.** { *; }
 -keep class v2ray.** { *; }
+
+# FIX IS HERE: Keep Google Play Core classes that Flutter may use.
+-keep class com.google.android.play.core.** { *; }
