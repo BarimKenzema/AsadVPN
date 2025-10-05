@@ -87,11 +87,11 @@ class VPNService {
       }
 
       var content = resp.body;
-
       if (content.contains('<!DOCTYPE')) {
         isSubscriptionValid = false;
         return false;
       }
+
       if (!content.contains('://')) {
         try {
           content = utf8.decode(base64.decode(content.trim()));
@@ -106,7 +106,6 @@ class VPNService {
 
       final vless = lines.where((l) => l.toLowerCase().startsWith('vless://')).toList();
       configServers = vless.isNotEmpty ? vless : lines;
-
       isSubscriptionValid = configServers.isNotEmpty;
       return isSubscriptionValid;
     } catch (e) {
@@ -136,7 +135,6 @@ class VPNService {
 
   static Future<Map<String, dynamic>> scanAndSelectBestServer() async {
     if (configServers.isEmpty) return {'success': false, 'error': 'No servers'};
-
     isScanning = true;
     fastestServers.clear();
     serversStreamController.add([]);
@@ -168,7 +166,7 @@ class VPNService {
     try {
       final name = _extractName(uri);
       final host = _extractHost(uri);
-      var port = _extractPort(uri);
+      final port = _extractPort(uri);
       if (host.isEmpty) return null;
 
       final sw = Stopwatch()..start();
@@ -202,7 +200,7 @@ class VPNService {
     return _extractHost(uri);
   }
 
-  // DEFINITIVE V2Ray JSON generator using string templates
+  // **THE FIX IS HERE: THIS IS THE RELIABLE JSON GENERATOR**
   static String generateV2RayConfig(String vlessUri) {
     try {
       final uri = Uri.parse(vlessUri.split('#').first);
@@ -245,7 +243,9 @@ class VPNService {
         "inbounds": [{
           "port": 10808,
           "protocol": "socks",
-          "settings": { "auth": "noauth", "udp": true }
+          "listen": "127.0.0.1",
+          "settings": { "auth": "noauth", "udp": true },
+          "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
         }],
         "outbounds": [{
           "protocol": "vless",
@@ -278,7 +278,10 @@ class VPNService {
       await flutterV2ray.requestPermission();
 
       final jsonConfig = generateV2RayConfig(vlessUri);
-      if (jsonConfig.isEmpty) return false;
+      if (jsonConfig.isEmpty) {
+        debugPrint("Generated JSON config is empty, aborting connection.");
+        return false;
+      }
 
       await flutterV2ray.startV2Ray(
         remark: 'AsadVPN',
