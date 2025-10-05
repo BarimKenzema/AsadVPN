@@ -28,11 +28,12 @@ jobs:
       - name: Disable analytics
         run: flutter config --no-analytics
 
-      - name: Clean everything
+      - name: Clean everything including git cache
         run: |
           flutter clean
           rm -rf pubspec.lock
           rm -rf .dart_tool
+          rm -rf ~/.pub-cache/git/*
           rm -rf ~/.pub-cache/hosted/pub.dev/flutter_v2ray-*
 
       - name: Get dependencies
