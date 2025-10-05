@@ -1,9 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    
+
+    <!-- Permissions required by the app and VPN service -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.BIND_VPN_SERVICE"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_VPN"/>
     <uses-permission android:name="android.permission.CAMERA"/>
 
@@ -29,20 +31,23 @@
             </intent-filter>
         </activity>
 
-        <!-- flutter_v2ray VPN service -->
+        <!-- Service declaration for flutter_v2ray_client plugin -->
         <service
-            android:name="com.github.blueboytm.flutter_v2ray.v2ray.services.V2rayVPNService"
-            android:exported="false"
-            android:permission="android.permission.BIND_VPN_SERVICE">
+            android:name="dev.amir.flutter_v2ray_client.services.V2rayVPNService"
+            android:label="AsadVPN"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false">
             <intent-filter>
-                <action android:name="android.net.VpnService"/>
+                <action android:name="android.net.VpnService" />
             </intent-filter>
-            <!-- FIX IS HERE: Android 14 requires this property tag for VPN services -->
-            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="vpn" />
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn"/>
         </service>
 
-        <meta-data android:name="flutterEmbedding" android:value="2" />
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
     </application>
 
     <queries>
