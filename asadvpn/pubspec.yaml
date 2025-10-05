@@ -21,7 +21,7 @@ dependencies:
   # CORRECT PACKAGE NAME: flutter_v2ray (not flutter_v2ray_client)
   flutter_v2ray:
     git:
-      url: https://github.com/amir-zr/flutter_v2ray_client.git
+      url: https://github.com/CuleFlaco/flutter_v2ray_client.git
       ref: main
 
 dev_dependencies:
