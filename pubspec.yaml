@@ -17,18 +17,17 @@ dependencies:
   flutter_localizations:
     sdk: flutter
   mobile_scanner: ^3.0.0
-  
-  # MUST USE GIT, NOT PUB.DEV VERSION!
+
   flutter_v2ray:
     git:
       url: https://github.com/CuleFlaco/flutter_v2ray.git
       ref: main
-dependency_overrides:
-flutter_v2ray:
-git:
-url: https://github.com/CuleFlaco/flutter_v2ray.git
-ref: main
 
+dependency_overrides:
+  flutter_v2ray:
+    git:
+      url: https://github.com/CuleFlaco/flutter_v2ray.git
+      ref: main
 
 dev_dependencies:
   flutter_test:
