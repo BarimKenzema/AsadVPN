@@ -22,36 +22,27 @@ class ServerInfo {
 }
 
 class VPNService {
+  // Use the new V2ray object from the plugin
   static final V2ray v2ray = V2ray(
     onStatusChanged: (status) {
-      final newStatus = status.state == 'CONNECTED';
-      if (isConnected != newStatus) {
-        isConnected = newStatus;
-        connectionStateController.add(isConnected);
-      }
+      isConnected = status.state == 'CONNECTED';
       debugPrint('V2Ray status: ${status.state}');
     },
   );
 
   static bool isConnected = false;
-  static String? currentConnectedConfig;
-  static int? currentConnectedPing;
-
   static bool isSubscriptionValid = false;
   static String? currentSubscriptionLink;
   static List<String> configServers = [];
   static List<ServerInfo> fastestServers = [];
-  static List<ServerInfo> allPingableServers = [];
   static bool isScanning = false;
-  static Timer? backgroundScanTimer;
 
   static StreamController<List<ServerInfo>> serversStreamController =
       StreamController<List<ServerInfo>>.broadcast();
-  static StreamController<bool> connectionStateController =
-      StreamController<bool>.broadcast();
 
   static Future<void> init() async {
     try {
+      // Initialize the new plugin
       await v2ray.initialize(
         notificationIconResourceName: "ic_launcher",
         notificationIconResourceType: "mipmap",
@@ -121,18 +112,16 @@ class VPNService {
     if (configServers.isEmpty) return {'success': false, 'error': 'No servers'};
     isScanning = true;
     fastestServers.clear();
-    allPingableServers.clear();
     serversStreamController.add([]);
 
     final shuffled = List<String>.from(configServers)..shuffle(Random());
     final batch = shuffled.take(min(10, shuffled.length)).toList();
 
-    final tests = batch.map((cfg) => _testServerWithPing(cfg, 5)).toList();
+    final tests = batch.map((cfg) => _testServerWithPing(cfg, 3)).toList();
     final results = await Future.wait(tests);
 
     final working = results.whereType<ServerInfo>().toList()..sort((a, b) => a.ping.compareTo(b.ping));
     fastestServers = working;
-    allPingableServers.addAll(working);
     serversStreamController.add(fastestServers);
     isScanning = false;
 
@@ -148,117 +137,57 @@ class VPNService {
 
   static Future<ServerInfo?> _testServerWithPing(String uri, int timeoutSec) async {
     try {
+      // Use the plugin's built-in delay checker
       final parser = V2ray.parseFromURL(uri);
-      final configJson = parser.getFullConfiguration();
-      
-      final delay = await v2ray.getServerDelay(config: configJson, timeout: timeoutSec * 1000);
+      final delay = await v2ray.getServerDelay(config: parser.getFullConfiguration());
 
       if (delay != -1) {
         return ServerInfo(
           config: uri,
           protocol: 'VLESS',
           ping: delay,
-          name: parser.remark.isNotEmpty ? parser.remark : parser.address,
+          name: parser.remark,
         );
       }
       return null;
     } catch (e) {
+      debugPrint("Ping test failed for $uri: $e");
       return null;
     }
   }
-
-  static void startBackgroundScanning() {
-    stopBackgroundScanning();
-    backgroundScanTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
-      if (allPingableServers.length >= 44 || configServers.isEmpty) {
-        timer.cancel();
-        backgroundScanTimer = null;
-        return;
-      }
-
-      final untested = configServers.where((config) => !allPingableServers.any((server) => server.config == config)).toList();
-      if (untested.isEmpty) {
-        timer.cancel();
-        backgroundScanTimer = null;
-        return;
-      }
-
-      untested.shuffle(Random());
-      final batch = untested.take(10).toList();
-      final tests = batch.map((cfg) => _testServerWithPing(cfg, 2)).toList();
-      final results = await Future.wait(tests);
-
-      bool hasNewServers = false;
-      for (var server in results.whereType<ServerInfo>()) {
-        if (!allPingableServers.any((s) => s.config == server.config)) {
-          allPingableServers.add(server);
-          hasNewServers = true;
-        }
-      }
-
-      if (hasNewServers) {
-        allPingableServers.sort((a, b) => a.ping.compareTo(b.ping));
-        serversStreamController.add(allPingableServers);
-        debugPrint('BG Scan: ${allPingableServers.length} servers found');
-      }
-    });
-  }
-
-  static void stopBackgroundScanning() {
-    backgroundScanTimer?.cancel();
-    backgroundScanTimer = null;
-  }
   
-  static Future<bool> connect(String vlessUri, {int? ping}) async {
+  static Future<bool> connect(String vlessUri) async {
     if (kIsWeb || !Platform.isAndroid) return false;
-    
-    if (isConnected && currentConnectedConfig != vlessUri) {
-        await disconnect();
-        await Future.delayed(const Duration(milliseconds: 500));
-    }
-    
     try {
+      // Use the plugin's built-in parser
       final parser = V2ray.parseFromURL(vlessUri);
-      final configJson = parser.getFullConfiguration();
       
+      // Request permission if needed
       if (await v2ray.requestPermission()) {
         await v2ray.startV2Ray(
           remark: parser.remark,
-          config: configJson,
+          config: parser.getFullConfiguration(),
           proxyOnly: false,
-          bypassSubnets: [],
+          bypassSubnets: [], // Route all traffic
         );
-        
-        await Future.delayed(const Duration(seconds: 1)); 
-        if (isConnected) {
-          currentConnectedConfig = vlessUri;
-          currentConnectedPing = ping;
-          startBackgroundScanning();
-          return true;
-        }
+        isConnected = true;
+        return true;
       }
       return false;
     } catch (e) {
       debugPrint('V2Ray connection error: $e');
-      await disconnect();
       return false;
     }
   }
 
   static Future<void> disconnect() async {
     try {
-      stopBackgroundScanning();
       await v2ray.stopV2Ray();
-    } catch (e) {
-      debugPrint('Disconnect error: $e');
-    } finally {
       isConnected = false;
-      currentConnectedConfig = null;
-      currentConnectedPing = null;
-      connectionStateController.add(false);
-      allPingableServers.clear();
       fastestServers.clear();
       serversStreamController.add([]);
+    } catch (e) {
+      debugPrint('Disconnect error: $e');
     }
   }
 }
