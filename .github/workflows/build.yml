@@ -25,10 +25,11 @@ jobs:
           flutter-version: '3.19.0'
           cache: true
 
+      # FIX IS HERE: Clean before getting dependencies
       - name: Clean Flutter
         run: flutter clean
 
-      - name: Get Flutter dependencies
+      - name: Get Flutter dependencies (from GitHub and pub.dev)
         run: flutter pub get
 
       - name: Build APK
