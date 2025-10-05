@@ -34,14 +34,25 @@ jobs:
       - name: Show pubspec.yaml content
         run: cat pubspec.yaml
 
-      - name: Get Flutter dependencies with verbose logging
-        run: flutter pub get --verbose
+      - name: Get Flutter dependencies
+        run: flutter pub get
 
-      - name: Show resolved dependencies
-        run: flutter pub deps --style=compact
-
-      - name: Show package config
-        run: cat .dart_tool/package_config.json | sed 's/","/",\n"/g' | sed 's/},{/},\n{/g' | grep -i flutter_v2ray -n || true
+      - name: Debug - Check if flutter_v2ray is resolved
+        run: |
+          echo "=== Checking pubspec.lock ==="
+          if [ -f "pubspec.lock" ]; then
+            cat pubspec.lock | grep -A10 "flutter_v2ray" || echo "flutter_v2ray NOT FOUND in pubspec.lock"
+          else
+            echo "pubspec.lock does not exist"
+          fi
+          echo "=== Checking package_config.json ==="
+          if [ -f ".dart_tool/package_config.json" ]; then
+            cat .dart_tool/package_config.json | grep "flutter_v2ray" || echo "flutter_v2ray NOT FOUND in package_config.json"
+          else
+            echo "package_config.json does not exist"
+          fi
+          echo "=== List all packages ==="
+          flutter pub deps --style=compact || true
 
       - name: Build APK
         run: flutter build apk --release
