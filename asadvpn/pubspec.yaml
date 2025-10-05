@@ -18,8 +18,8 @@ dependencies:
     sdk: flutter
   mobile_scanner: ^3.0.0
   
-  # THE DEFINITIVE FIX: Using the correct GitHub username 'amir-zr'
-  flutter_v2ray_client:
+  # CORRECT PACKAGE NAME: flutter_v2ray (not flutter_v2ray_client)
+  flutter_v2ray:
     git:
       url: https://github.com/amir-zr/flutter_v2ray_client.git
       ref: main
