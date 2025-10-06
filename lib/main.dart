@@ -128,8 +128,22 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    
     if (state == AppLifecycleState.resumed) {
+      debugPrint('📱 App resumed from background');
       _updateConnectionStatus();
+      
+      // Resume auto-scan when app comes back
+      if (!VPNService.isConnected && 
+          VPNService.fastestServers.length < 11 &&
+          VPNService.currentSubscriptionLink != null &&
+          !VPNService.isScanning) {
+        debugPrint('🔵 Resuming auto-scan (${VPNService.fastestServers.length}/11 servers)...');
+        VPNService.resumeAutoScan();
+      }
+    } else if (state == AppLifecycleState.paused) {
+      debugPrint('📱 App going to background (scan will pause and resume when you return)');
     }
   }
 
@@ -469,7 +483,6 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                           valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
                         ),
                         const SizedBox(height: 16),
-                        // CANCEL BUTTON
                         TextButton.icon(
                           onPressed: () {
                             VPNService.cancelScan();
@@ -596,6 +609,37 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
             ),
             child: Column(
               children: [
+                // Scanning progress indicator
+                if (!VPNService.isConnected && 
+                    VPNService.fastestServers.length < 11 && 
+                    VPNService.currentSubscriptionLink != null)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    color: Colors.blue.withOpacity(0.1),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            'Finding servers... ${VPNService.fastestServers.length}/11',
+                            style: TextStyle(color: Colors.blue, fontSize: 12),
+                          ),
+                        ),
+                        Text(
+                          'Background',
+                          style: TextStyle(color: Colors.blue.withOpacity(0.7), fontSize: 10),
+                        ),
+                      ],
+                    ),
+                  ),
                 Container(
                   padding: const EdgeInsets.all(16),
                   child: Row(
