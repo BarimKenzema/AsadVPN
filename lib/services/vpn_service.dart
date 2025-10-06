@@ -304,7 +304,7 @@ class VPNService {
         }
         
         final result = await _testServerWithPing(prioritized[i]).timeout(
-          const Duration(seconds: 1),
+          const Duration(seconds: 2),
           onTimeout: () => null,
         );
         
@@ -603,7 +603,7 @@ class VPNService {
         debugPrint('🔵 Testing displayed server ${i + 1}/${sortedDisplayed.length}: ${sortedDisplayed[i].name}...');
         
         final result = await _testServerWithPing(sortedDisplayed[i].config).timeout(
-          const Duration(seconds: 1),
+          const Duration(seconds: 2),
           onTimeout: () {
             debugPrint('⏱️ Displayed server timeout (${sortedDisplayed[i].name})');
             return null;
@@ -671,7 +671,7 @@ class VPNService {
       debugPrint('🔵 Testing new server $tested/30...');
       
       final result = await _testServerWithPing(config).timeout(
-        const Duration(seconds: 1),
+        const Duration(seconds: 2),
         onTimeout: () {
           debugPrint('⏱️ New server test timeout');
           return null;
@@ -771,7 +771,7 @@ class VPNService {
       // Add internal timeout to the actual delay check
       final delay = await v2ray.getServerDelay(config: config)
           .timeout(
-            const Duration(seconds: 1),
+            const Duration(seconds: 2),
             onTimeout: () {
               return -1;
             },
