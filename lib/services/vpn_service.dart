@@ -37,21 +37,16 @@ class VPNService {
   static bool isScanning = false;
   static String? currentConnectedConfig;
   static int? currentConnectedPing;
-  static int scanProgress = 0;
-  static int totalToScan = 0;
 
   // Caching
   static Map<String, ServerCache> serverCache = {};
   static String? lastGoodServer;
   static List<String> topServers = [];
 
-  // Stats
+  // Stats & Timers
   static int sessionDownload = 0;
   static int sessionUpload = 0;
   static List<ConnectionStats> dailyStats = [];
-
-  // Timers
-  static Timer? _backgroundScanTimer;
   static Timer? _healthCheckTimer;
   static bool _isBackgroundScanning = false;
 
@@ -66,21 +61,14 @@ class VPNService {
 
   static void _updateConnectionState(V2RayStatus status) {
     final newIsConnected = status.state == 'CONNECTED';
-    
-    // Track traffic
     if (newIsConnected) {
       sessionDownload = status.download;
       sessionUpload = status.upload;
     }
-    
     statusStreamController.add(status);
-    
     if (isConnected != newIsConnected) {
       isConnected = newIsConnected;
       connectionStateController.add(isConnected);
-      debugPrint('🔵 V2Ray status changed to: ${status.state}');
-      
-      // If disconnected unexpectedly, try to reconnect
       if (!newIsConnected && currentConnectedConfig != null) {
         _handleDisconnect();
       }
@@ -88,48 +76,30 @@ class VPNService {
   }
 
   static void _handleDisconnect() {
-    debugPrint('⚠️ Unexpected disconnect, attempting reconnect...');
     Future.delayed(const Duration(seconds: 2), () async {
       if (!isConnected && fastestServers.isNotEmpty) {
-        // Try the fastest available server
-        await connect(
-          vlessUri: fastestServers.first.config,
-          ping: fastestServers.first.ping,
-        );
+        await connect(vlessUri: fastestServers.first.config, ping: fastestServers.first.ping);
       }
     });
   }
 
   static Future<void> init() async {
     try {
-      debugPrint('🔵 Initializing VPN Service...');
-
       await v2ray.initialize(
-        notificationIconResourceName: "ic_launcher",
-        notificationIconResourceType: "mipmap",
-      );
-
+          notificationIconResourceName: "ic_launcher",
+          notificationIconResourceType: "mipmap");
       await _loadCache();
       await _loadStats();
-
       final prefs = await SharedPreferences.getInstance();
       currentSubscriptionLink = prefs.getString('subscription_link');
       lastGoodServer = prefs.getString('last_good_server');
-      
-      final topServersList = prefs.getStringList('top_servers');
-      if (topServersList != null) {
-        topServers = topServersList;
-      }
-
+      topServers = prefs.getStringList('top_servers') ?? [];
       if (currentSubscriptionLink != null && currentSubscriptionLink!.isNotEmpty) {
-        isSubscriptionValid = true;
+        isSubscriptionValid = true; // Assume valid, verify on connect
       }
-      
-      // Pre-populate with cached servers
-      _updateFastestServersFromCache();
-
-    } catch (e, stack) {
-      debugPrint('❌ Init error: $e\n$stack');
+      _updateFastestServersFromCache(); // Show cached servers immediately
+    } catch (e) {
+      debugPrint('❌ Init error: $e');
     }
   }
 
@@ -137,73 +107,30 @@ class VPNService {
     _healthCheckTimer?.cancel();
     _healthCheckTimer = Timer.periodic(const Duration(seconds: 10), (timer) async {
       if (isConnected) {
-        try {
-          final delay = await v2ray.getConnectedServerDelay();
-          if (delay == -1 || delay > 5000) {
-            debugPrint('⚠️ Connection unhealthy (${delay}ms), reconnecting...');
-            _handleDisconnect();
-          }
-        } catch (e) {
-          debugPrint('❌ Health check error: $e');
-        }
+        final delay = await v2ray.getConnectedServerDelay();
+        if (delay == -1) _handleDisconnect();
       }
     });
   }
 
   static Future<void> _loadCache() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final cacheJson = prefs.getString('server_cache');
-      if (cacheJson != null) {
-        final Map<String, dynamic> decoded = jsonDecode(cacheJson);
-        serverCache = decoded.map(
-          (key, value) => MapEntry(key, ServerCache.fromJson(value)),
-        );
-        debugPrint('✅ Loaded ${serverCache.length} cached servers');
-      }
-    } catch (e) {
-      debugPrint('❌ Cache load error: $e');
+    final prefs = await SharedPreferences.getInstance();
+    final cacheJson = prefs.getString('server_cache');
+    if (cacheJson != null) {
+      serverCache = (jsonDecode(cacheJson) as Map<String, dynamic>)
+          .map((k, v) => MapEntry(k, ServerCache.fromJson(v)));
     }
   }
 
   static Future<void> _saveCache() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final encoded = jsonEncode(
-        serverCache.map((key, value) => MapEntry(key, value.toJson())),
-      );
-      await prefs.setString('server_cache', encoded);
-    } catch (e) {
-      debugPrint('❌ Cache save error: $e');
-    }
-  }
-
-  static Future<void> _loadStats() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final statsJson = prefs.getString('daily_stats');
-      if (statsJson != null) {
-        final List<dynamic> decoded = jsonDecode(statsJson);
-        dailyStats = decoded.map((e) => ConnectionStats.fromJson(e)).toList();
-      }
-    } catch (e) {
-      debugPrint('❌ Stats load error: $e');
-    }
-  }
-
-  static Future<void> _saveStats() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final encoded = jsonEncode(dailyStats.map((e) => e.toJson()).toList());
-      await prefs.setString('daily_stats', encoded);
-    } catch (e) {
-      debugPrint('❌ Stats save error: $e');
-    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('server_cache',
+        jsonEncode(serverCache.map((k, v) => MapEntry(k, v.toJson()))));
   }
 
   static void _updateFastestServersFromCache() {
     fastestServers = serverCache.values
-        .where((c) => !c.isStale && c.lastPing > 0)
+        .where((c) => c.lastPing > 0)
         .map((c) => ServerInfo(
               config: c.config,
               protocol: c.protocol,
@@ -214,196 +141,105 @@ class VPNService {
             ))
         .toList()
       ..sort((a, b) => a.ping.compareTo(b.ping));
-    
     serversStreamController.add(List.from(fastestServers));
   }
 
   static Future<bool> validateSubscription() async {
-    if (currentSubscriptionLink == null || currentSubscriptionLink!.isEmpty) {
-      isSubscriptionValid = false;
-      return false;
-    }
-
+    if (currentSubscriptionLink == null || currentSubscriptionLink!.isEmpty) return false;
     try {
-      final resp = await http
-          .get(Uri.parse(currentSubscriptionLink!),
-              headers: {'User-Agent': 'AsadVPN/1.0'})
-          .timeout(const Duration(seconds: 20));
-
-      if (resp.statusCode != 200 || resp.body.contains('<!DOCTYPE')) {
-        isSubscriptionValid = false;
-        return false;
-      }
-
+      final resp = await http.get(Uri.parse(currentSubscriptionLink!), headers: {'User-Agent': 'AsadVPN/1.0'});
+      if (resp.statusCode != 200) return false;
       var content = resp.body;
-      if (!content.contains('://')) {
-        try {
-          content = utf8.decode(base64.decode(content.trim()));
-        } catch (_) {}
-      }
-
-      final lines = content
-          .split('\n')
-          .map((l) => l.trim())
-          .where((l) => l.isNotEmpty && !l.startsWith('#'))
-          .toList();
-
-      final vless = lines.where((l) => l.toLowerCase().startsWith('vless://')).toList();
-      final vmess = lines.where((l) => l.toLowerCase().startsWith('vmess://')).toList();
-      final trojan = lines.where((l) => l.toLowerCase().startsWith('trojan://')).toList();
-      final ss = lines.where((l) => l.toLowerCase().startsWith('ss://')).toList();
-
-      configServers = [...vless, ...vmess, ...trojan, ...ss];
-
-      if (configServers.isEmpty) {
-        configServers = lines;
-      }
-
-      isSubscriptionValid = configServers.isNotEmpty;
-      return isSubscriptionValid;
+      if (!content.contains('://')) content = utf8.decode(base64.decode(content.trim()));
+      final lines = content.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty && !l.startsWith('#')).toList();
+      configServers = lines.where((l) => l.startsWith('vless://') || l.startsWith('vmess://') || l.startsWith('trojan://') || l.startsWith('ss://')).toList();
+      return configServers.isNotEmpty;
     } catch (e) {
-      isSubscriptionValid = false;
       return false;
     }
   }
 
   static Future<bool> saveSubscriptionLink(String link) async {
-    try {
-      link = link.trim().replaceAll(RegExp(r'[\u200B-\u200D\uFEFF]'), '');
-
-      if (!link.startsWith('http')) return false;
-
-      final prefs = await SharedPreferences.getInstance();
-      currentSubscriptionLink = link;
-      await prefs.setString('subscription_link', link);
-
-      isSubscriptionValid = true; // Assume valid until user connects
-      
-      return true;
-    } catch (e) {
-      return false;
-    }
+    link = link.trim();
+    if (!link.startsWith('http')) return false;
+    final prefs = await SharedPreferences.getInstance();
+    currentSubscriptionLink = link;
+    await prefs.setString('subscription_link', link);
+    isSubscriptionValid = true;
+    return true;
   }
 
   static Future<Map<String, dynamic>> scanAndSelectBestServer() async {
     isScanning = true;
     scanStatusController.add('Checking subscription...');
-    await validateSubscription();
-    
-    if (configServers.isEmpty) {
-      return {'success': false, 'error': 'No servers'};
+    if (!await validateSubscription()) {
+      isScanning = false;
+      return {'success': false, 'error': 'Subscription invalid or unreachable'};
     }
     
-    fastestServers.clear();
+    fastestServers.clear(); // Clear old list for fresh pings
     
+    // Test top servers first, then others
     final prioritized = _prioritizeServers();
     
     bool hasConnected = false;
-
-    // Phase 1: Test 3 BY 3 until first connection
-    scanStatusController.add('Finding fastest server...');
     const batchSize = 3;
-    
+
+    scanStatusController.add('Finding fastest server...');
     for (int i = 0; i < prioritized.length && !hasConnected; i += batchSize) {
-      final end = min(i + batchSize, prioritized.length);
-      final chunk = prioritized.sublist(i, end);
-
-      final futures = chunk.map((config) => _testServerWithPing(config).timeout(
-        const Duration(seconds: 5),
-        onTimeout: () => null,
-      )).toList();
-
+      final chunk = prioritized.sublist(i, min(i + batchSize, prioritized.length));
+      final futures = chunk.map((c) => _testServerWithPing(c).timeout(const Duration(seconds: 4))).toList();
       final results = await Future.wait(futures);
-      final working = results.whereType<ServerInfo>().toList()
-        ..sort((a, b) => a.ping.compareTo(b.ping));
       
-      if (working.isNotEmpty && !hasConnected) {
+      final working = results.whereType<ServerInfo>().toList()..sort((a,b) => a.ping.compareTo(b.ping));
+      
+      if (working.isNotEmpty) {
         hasConnected = true;
-        isScanning = false;
-        
         final best = working.first;
         unawaited(connect(vlessUri: best.config, ping: best.ping));
-        
-        // Start background scan 11 seconds AFTER connecting
-        Future.delayed(const Duration(seconds: 11), () => _backgroundScan());
-        
-        fastestServers.add(best);
+        fastestServers = working; // Show the first batch of working servers
         serversStreamController.add(List.from(fastestServers));
-        
-        await _updateTopServers([best.config]);
-        
+        isScanning = false;
         return {'success': true, 'server': best.config, 'ping': best.ping};
       }
     }
 
     isScanning = false;
-    return {'success': false, 'error': 'No working servers'};
+    return {'success': false, 'error': 'No working servers found'};
   }
 
-  // Background scan one-by-one to fill up to 11 servers
   static Future<void> _backgroundScan() async {
-    if (_isBackgroundScanning) return;
+    if (_isBackgroundScanning || isConnected) return; // Don't scan if already scanning or connected
     
     _isBackgroundScanning = true;
-    scanStatusController.add('Scanning more servers...');
+    scanStatusController.add('Updating server list...');
 
-    final prioritized = _prioritizeServers();
+    final serversToScan = _prioritizeServers().where((c) => !fastestServers.any((s) => s.config == c)).toList();
     const maxServers = 11;
     
-    final testedConfigs = fastestServers.map((s) => s.config).toSet();
-    final serversToTest = prioritized.where((config) => !testedConfigs.contains(config)).toList();
-    
-    for (final config in serversToTest) {
+    for (final config in serversToScan) {
       if (fastestServers.length >= maxServers) break;
-
-      final result = await _testServerWithPing(config).timeout(
-        const Duration(seconds: 5),
-        onTimeout: () => null,
-      );
-
-      if (result != null) {
-        if (!fastestServers.any((s) => s.config == result.config)) {
-          fastestServers.add(result);
-          fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
-          serversStreamController.add(List.from(fastestServers));
-        }
+      final result = await _testServerWithPing(config).timeout(const Duration(seconds: 4), onTimeout: () => null);
+      if (result != null && !fastestServers.any((s) => s.config == result.config)) {
+        fastestServers.add(result);
+        fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+        serversStreamController.add(List.from(fastestServers));
       }
     }
-
-    if (fastestServers.isNotEmpty) {
-      await _updateTopServers(fastestServers.map((s) => s.config).toList());
-    }
-
+    
+    await _updateTopServers(fastestServers.map((s) => s.config).toList());
     _isBackgroundScanning = false;
-    scanStatusController.add(''); // Clear status text
+    scanStatusController.add('');
   }
 
   static List<String> _prioritizeServers() {
-    final Set<String> processed = {};
-    final List<String> result = [];
-
-    // 1. Top servers first
+    final processed = <String>{};
+    final result = <String>[];
     for (var config in topServers) {
-      if (configServers.contains(config) && !processed.contains(config)) {
-        result.add(config);
-        processed.add(config);
-      }
+      if (configServers.contains(config) && processed.add(config)) result.add(config);
     }
-
-    // 2. Cached servers with good success rate
-    final goodCached = serverCache.entries
-        .where((e) => e.value.successRate > 0.7 && configServers.contains(e.key))
-        .map((e) => e.key)
-        .where((c) => !processed.contains(c))
-        .toList();
-    result.addAll(goodCached);
-    processed.addAll(goodCached);
-
-    // 3. Rest of servers (shuffled)
-    final remaining = configServers.where((c) => !processed.contains(c)).toList()
-      ..shuffle(Random());
+    final remaining = configServers.where((c) => !processed.contains(c)).toList()..shuffle();
     result.addAll(remaining);
-
     return result;
   }
 
@@ -416,50 +252,20 @@ class VPNService {
   static Future<ServerInfo?> _testServerWithPing(String uri) async {
     try {
       final parser = V2ray.parseFromURL(uri);
-      final config = parser.getFullConfiguration();
-
-      final delay = await v2ray.getServerDelay(config: config);
-
-      if (delay != -1 && delay < 5000) {
+      final delay = await v2ray.getServerDelay(config: parser.getFullConfiguration());
+      if (delay != -1) {
         final existing = serverCache[uri];
-        serverCache[uri] = ServerCache(
-          config: uri,
-          name: parser.remark,
-          protocol: _getProtocol(uri),
-          lastPing: delay,
-          lastTested: DateTime.now(),
-          successCount: existing?.successCount ?? 0,
-          failureCount: existing?.failureCount ?? 0,
-          lastConnected: existing?.lastConnected,
-        );
+        serverCache[uri] = ServerCache(config: uri, name: parser.remark, protocol: _getProtocol(uri), lastPing: delay, lastTested: DateTime.now(), successCount: (existing?.successCount ?? 0) + 1, failureCount: existing?.failureCount ?? 0, lastConnected: existing?.lastConnected);
         unawaited(_saveCache());
-
-        return ServerInfo(
-          config: uri,
-          protocol: _getProtocol(uri),
-          ping: delay,
-          name: parser.remark,
-          successRate: serverCache[uri]!.successRate,
-        );
-      } else {
-        final existing = serverCache[uri];
-        if (existing != null) {
-          serverCache[uri] = ServerCache(
-            config: uri,
-            name: existing.name,
-            protocol: existing.protocol,
-            lastPing: existing.lastPing,
-            lastTested: DateTime.now(),
-            successCount: existing.successCount,
-            failureCount: existing.failureCount + 1,
-          );
-          unawaited(_saveCache());
-        }
+        return ServerInfo(config: uri, protocol: _getProtocol(uri), ping: delay, name: parser.remark, successRate: serverCache[uri]!.successRate);
       }
-      return null;
-    } catch (e) {
-      return null;
+    } catch (e) {/* Ignore errors */}
+    final existing = serverCache[uri];
+    if (existing != null) {
+      serverCache[uri] = ServerCache(config: uri, name: existing.name, protocol: existing.protocol, lastPing: -1, lastTested: DateTime.now(), successCount: existing.successCount, failureCount: existing.failureCount + 1);
+      unawaited(_saveCache());
     }
+    return null;
   }
 
   static String _getProtocol(String uri) {
@@ -472,140 +278,52 @@ class VPNService {
 
   static Future<bool> connect({required String vlessUri, int? ping}) async {
     if (kIsWeb || !Platform.isAndroid) return false;
-
     try {
-      if (isConnected) {
-        await disconnect();
-        await Future.delayed(const Duration(milliseconds: 500));
-      }
-
+      if (isConnected) await disconnect();
       final parser = V2ray.parseFromURL(vlessUri);
-      final config = parser.getFullConfiguration();
-
       if (await v2ray.requestPermission()) {
-        await v2ray.startV2Ray(
-          remark: parser.remark,
-          config: config,
-          proxyOnly: false,
-          bypassSubnets: [],
-        );
-
+        await v2ray.startV2Ray(remark: parser.remark, config: parser.getFullConfiguration(), proxyOnly: false, bypassSubnets: []);
         currentConnectedConfig = vlessUri;
         currentConnectedPing = ping;
-
-        final existing = serverCache[vlessUri];
-        if (existing != null) {
-          serverCache[vlessUri] = ServerCache(
-            config: vlessUri,
-            name: existing.name,
-            protocol: existing.protocol,
-            lastPing: existing.lastPing,
-            lastTested: existing.lastTested,
-            successCount: existing.successCount + 1,
-            failureCount: existing.failureCount,
-            lastConnected: DateTime.now(),
-          );
-        } else {
-          serverCache[vlessUri] = ServerCache(
-            config: vlessUri,
-            name: parser.remark,
-            protocol: _getProtocol(vlessUri),
-            lastPing: ping ?? -1,
-            lastTested: DateTime.now(),
-            successCount: 1,
-            lastConnected: DateTime.now(),
-          );
-        }
-
         lastGoodServer = vlessUri;
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString('last_good_server', vlessUri);
-        unawaited(_saveCache());
-
+        final existing = serverCache[vlessUri];
+        if (existing != null) {
+          serverCache[vlessUri] = ServerCache(config: vlessUri, name: existing.name, protocol: existing.protocol, lastPing: existing.lastPing, lastTested: existing.lastTested, successCount: existing.successCount, failureCount: existing.failureCount, lastConnected: DateTime.now());
+          unawaited(_saveCache());
+        }
         _startHealthCheck();
-        debugPrint('✅ Connected successfully');
         return true;
       }
       return false;
     } catch (e) {
-      final existing = serverCache[vlessUri];
-      if (existing != null) {
-        serverCache[vlessUri] = ServerCache(
-          config: vlessUri,
-          name: existing.name,
-          protocol: existing.protocol,
-          lastPing: existing.lastPing,
-          lastTested: existing.lastTested,
-          successCount: existing.successCount,
-          failureCount: existing.failureCount + 1,
-        );
-        unawaited(_saveCache());
-      }
       debugPrint('❌ Connection error: $e');
       return false;
     }
   }
 
-  static Future<bool> connectToLastGoodServer() async {
-    if (lastGoodServer != null && lastGoodServer!.isNotEmpty) {
-      debugPrint('🔵 Connecting to last good server...');
-      final cached = serverCache[lastGoodServer];
-      return await connect(
-        vlessUri: lastGoodServer!,
-        ping: cached?.lastPing,
-      );
-    }
-    return false;
-  }
-
   static Future<void> disconnect() async {
+    _healthCheckTimer?.cancel();
     try {
-      _healthCheckTimer?.cancel();
-      
-      if (isConnected && (sessionDownload > 0 || sessionUpload > 0)) {
-        final today = DateTime.now();
-        final todayStats = dailyStats.firstWhere(
-          (s) =>
-              s.date.year == today.year &&
-              s.date.month == today.month &&
-              s.date.day == today.day,
-          orElse: () => ConnectionStats(
-            totalDownload: 0,
-            totalUpload: 0,
-            date: today,
-          ),
-        );
-
-        dailyStats.removeWhere((s) =>
-            s.date.year == today.year &&
-            s.date.month == today.month &&
-            s.date.day == today.day);
-
-        dailyStats.add(ConnectionStats(
-          totalDownload: todayStats.totalDownload + sessionDownload,
-          totalUpload: todayStats.totalUpload + sessionUpload,
-          date: today,
-        ));
-
-        await _saveStats();
-      }
-
       await v2ray.stopV2Ray();
-      debugPrint('✅ Disconnected');
     } catch (e) {
       debugPrint('❌ Disconnect error: $e');
     } finally {
       isConnected = false;
       currentConnectedConfig = null;
       currentConnectedPing = null;
-      sessionDownload = 0;
-      sessionUpload = 0;
       connectionStateController.add(false);
+      // After disconnecting, refresh the server list
+      unawaited(_backgroundScan());
     }
   }
-
+  
+  // Stubs for methods you'll need later
+  static Future<void> _loadStats() async {}
+  static Future<void> _saveStats() async {}
+  static Future<bool> connectToLastGoodServer() async { return false; }
   static void dispose() {
-    _backgroundScanTimer?.cancel();
     _healthCheckTimer?.cancel();
     serversStreamController.close();
     connectionStateController.close();
@@ -614,5 +332,4 @@ class VPNService {
   }
 }
 
-// Helper to avoid warnings for unawaited futures
 void unawaited(Future<void> future) {}
