@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_v2ray/flutter_v2ray.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import '../models/server_cache.dart';
 
 class ServerInfo {
@@ -24,6 +25,15 @@ class ServerInfo {
     this.successRate = 0.0,
     this.lastConnected,
   });
+}
+
+// Custom exception for network errors
+class NetworkException implements Exception {
+  final String message;
+  NetworkException(this.message);
+  
+  @override
+  String toString() => message;
 }
 
 class VPNService {
@@ -56,7 +66,7 @@ class VPNService {
   static Timer? _healthCheckTimer;
   static bool _isBackgroundScanning = false;
   static DateTime? _lastConnectionTime;
-  static bool _isManualDisconnect = false; // NEW: Track manual disconnects
+  static bool _isManualDisconnect = false;
 
   static final StreamController<List<ServerInfo>> serversStreamController =
       StreamController<List<ServerInfo>>.broadcast();
@@ -86,7 +96,7 @@ class VPNService {
       // Start background scan 11 seconds after successful connection
       if (newIsConnected && _lastConnectionTime == null) {
         _lastConnectionTime = DateTime.now();
-        _isManualDisconnect = false; // Reset flag on new connection
+        _isManualDisconnect = false;
         debugPrint('🔵 Connection successful, will start background scan in 11 seconds...');
         Future.delayed(const Duration(seconds: 11), () {
           if (isConnected && fastestServers.length < 11) {
@@ -117,6 +127,26 @@ class VPNService {
         );
       }
     });
+  }
+
+  static Future<bool> hasInternetConnection() async {
+    try {
+      final connectivityResult = await Connectivity().checkConnectivity();
+      if (connectivityResult == ConnectivityResult.none) {
+        debugPrint('❌ No internet connection (connectivity check)');
+        return false;
+      }
+      
+      // Double-check with actual network request
+      final result = await InternetAddress.lookup('google.com')
+          .timeout(const Duration(seconds: 5));
+      final hasConnection = result.isNotEmpty && result[0].rawAddress.isNotEmpty;
+      debugPrint(hasConnection ? '✅ Internet connection OK' : '❌ No internet connection');
+      return hasConnection;
+    } catch (e) {
+      debugPrint('❌ Internet check failed: $e');
+      return false;
+    }
   }
 
   static Future<void> init() async {
@@ -313,6 +343,14 @@ class VPNService {
       isSubscriptionValid = configServers.isNotEmpty;
       debugPrint('✅ Subscription valid: $isSubscriptionValid, servers: ${configServers.length}');
       return isSubscriptionValid;
+    } on SocketException catch (e) {
+      isSubscriptionValid = false;
+      debugPrint('❌ Network error during validation: $e');
+      throw NetworkException('No internet connection');
+    } on TimeoutException catch (e) {
+      isSubscriptionValid = false;
+      debugPrint('❌ Timeout during validation: $e');
+      throw NetworkException('Connection timeout');
     } catch (e) {
       isSubscriptionValid = false;
       debugPrint('❌ Subscription validation error: $e');
@@ -327,17 +365,32 @@ class VPNService {
       if (!link.startsWith('http')) return false;
 
       final prefs = await SharedPreferences.getInstance();
+      
+      // If it's the same link already saved, don't re-validate
+      if (currentSubscriptionLink == link && link.isNotEmpty) {
+        debugPrint('✅ Subscription link unchanged, keeping existing');
+        return true;
+      }
+
       currentSubscriptionLink = link;
       await prefs.setString('subscription_link', link);
 
-      final valid = await validateSubscription();
-      if (!valid) {
-        await prefs.remove('subscription_link');
-        currentSubscriptionLink = null;
+      // Try to validate
+      try {
+        final valid = await validateSubscription();
+        if (!valid) {
+          // Invalid content (not network error)
+          await prefs.remove('subscription_link');
+          currentSubscriptionLink = null;
+        }
+        debugPrint('✅ Subscription link ${valid ? "saved and validated" : "invalid"}');
+        return valid;
+      } on NetworkException catch (e) {
+        // Network error - KEEP the subscription
+        debugPrint('⚠️ Cannot validate subscription (${e.message}), but keeping it saved');
+        // Keep currentSubscriptionLink and prefs as-is
+        return false; // Return false but don't delete
       }
-      
-      debugPrint('✅ Subscription link ${valid ? "saved and validated" : "invalid"}');
-      return valid;
     } catch (e) {
       debugPrint('❌ Save subscription error: $e');
       return false;
@@ -345,14 +398,23 @@ class VPNService {
   }
 
   static Future<Map<String, dynamic>> scanAndSelectBestServer({bool connectImmediately = true}) async {
+    // Check internet connection first
+    if (!await hasInternetConnection()) {
+      return {'success': false, 'error': 'No internet connection'};
+    }
+
     if (currentSubscriptionLink == null || currentSubscriptionLink!.isEmpty) {
       return {'success': false, 'error': 'No subscription link'};
     }
 
     if (configServers.isEmpty) {
-      final valid = await validateSubscription();
-      if (!valid) {
-        return {'success': false, 'error': 'Invalid subscription or no servers'};
+      try {
+        final valid = await validateSubscription();
+        if (!valid) {
+          return {'success': false, 'error': 'Invalid subscription or no servers'};
+        }
+      } on NetworkException {
+        return {'success': false, 'error': 'No internet connection'};
       }
     }
 
@@ -675,12 +737,12 @@ class VPNService {
 
     try {
       if (isConnected) {
-        _isManualDisconnect = true; // Mark as manual before disconnecting
+        _isManualDisconnect = true;
         await disconnect();
         await Future.delayed(const Duration(milliseconds: 500));
       }
 
-      _isManualDisconnect = false; // Reset for new connection
+      _isManualDisconnect = false;
 
       final parser = V2ray.parseFromURL(vlessUri);
       final config = parser.getFullConfiguration();
@@ -762,7 +824,7 @@ class VPNService {
 
   static Future<void> disconnect() async {
     try {
-      _isManualDisconnect = true; // Mark as manual disconnect
+      _isManualDisconnect = true;
       
       if (isConnected && (sessionDownload > 0 || sessionUpload > 0)) {
         final today = DateTime.now();

@@ -151,24 +151,12 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
     await VPNService.init();
     if (!mounted) return;
     
-    // DON'T check subscription validity here
+    // Don't check subscription validity here
     // Only show dialog if there's NO subscription link at all
     if (VPNService.currentSubscriptionLink == null || VPNService.currentSubscriptionLink!.isEmpty) {
       _showSubscriptionDialog();
     } else {
-      // We have a subscription link saved, just update UI
       _updateConnectionStatus();
-      
-      // Try auto-connect to last good server if desired
-      // (disabled for now, can be enabled in settings later)
-      // if (VPNService.lastGoodServer != null) {
-      //   final autoConnect = await _shouldAutoConnect();
-      //   if (autoConnect) {
-      //     setState(() => isConnecting = true);
-      //     await VPNService.connectToLastGoodServer();
-      //     setState(() => isConnecting = false);
-      //   }
-      // }
     }
   }
 
@@ -189,24 +177,43 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
     setState(() {
       isConnecting = true;
       status = l10n?.connecting ?? 'A Moment Please...';
-      scanStatus = 'Preparing...';
+      scanStatus = 'Checking connection...';
     });
 
-    // THIS is where validation happens (inside scanAndSelectBestServer)
     final result = await VPNService.scanAndSelectBestServer();
     if (!mounted) return;
 
     if (result['success'] != true) {
       final error = result['error'] ?? 'Unknown error';
-      setState(() {
-        status = error.contains('subscription') || error.contains('Invalid')
-            ? (l10n?.invalidSubscription ?? 'Invalid subscription')
-            : (l10n?.noServers ?? 'No servers available');
-      });
       
-      // If subscription validation failed, show dialog
-      if (error.contains('subscription') || error.contains('Invalid')) {
+      // Handle different error types
+      if (error.contains('No internet connection')) {
+        setState(() {
+          status = 'No internet connection';
+        });
+        
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: const [
+                Icon(Icons.wifi_off, color: Colors.white),
+                SizedBox(width: 8),
+                Expanded(child: Text('Please check your internet connection')),
+              ],
+            ),
+            backgroundColor: Colors.orange,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      } else if (error.contains('subscription') || error.contains('Invalid')) {
+        setState(() {
+          status = l10n?.invalidSubscription ?? 'Invalid subscription';
+        });
         _showSubscriptionDialog();
+      } else {
+        setState(() {
+          status = l10n?.noServers ?? 'No servers available';
+        });
       }
     }
     
@@ -281,11 +288,36 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                     ));
                   }
                 } else {
+                  // Check if it's a network error or invalid subscription
                   if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                      content: Text(AppLocalizations.of(context)?.invalidSubscription ?? 'Invalid subscription'),
-                      backgroundColor: Colors.red,
-                    ));
+                    final hasInternet = await VPNService.hasInternetConnection();
+                    if (!hasInternet) {
+                      // Network error - keep subscription, show warning
+                      Navigator.pop(ctx); // Close dialog
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Row(
+                            children: const [
+                              Icon(Icons.wifi_off, color: Colors.white),
+                              SizedBox(width: 8),
+                              Expanded(
+                                child: Text('Cannot verify subscription. Check internet connection.'),
+                              ),
+                            ],
+                          ),
+                          backgroundColor: Colors.orange,
+                          duration: const Duration(seconds: 4),
+                        ),
+                      );
+                    } else {
+                      // Invalid subscription
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(AppLocalizations.of(context)?.invalidSubscription ?? 'Invalid subscription'),
+                          backgroundColor: Colors.red,
+                        ),
+                      );
+                    }
                   }
                 }
               }
