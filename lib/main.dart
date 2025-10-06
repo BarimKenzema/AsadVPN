@@ -188,28 +188,11 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
       final result = await VPNService.scanAndSelectBestServer();
       if (!mounted) return;
 
-      if (result['success'] == true) {
-        await VPNService.connect(vlessUri: result['server'], ping: result['ping']);
-      } else {
+      if (result['success'] != true) {
         setState(() {
           status = l10n?.noServers ?? 'No servers available';
         });
       }
-      setState(() => isConnecting = false);
-    }
-  }
-
-  Future<void> _refreshServers() async {
-    if (VPNService.isScanning) return;
-    
-    setState(() {
-      isConnecting = true;
-      scanStatus = 'Refreshing...';
-    });
-
-    await VPNService.scanAndSelectBestServer();
-    
-    if (mounted) {
       setState(() => isConnecting = false);
     }
   }
@@ -528,7 +511,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
             ),
           ),
           
-          // Server list with pull-to-refresh
+          // Server list (NO REFRESH BUTTON)
           Container(
             height: 250,
             decoration: BoxDecoration(
@@ -560,34 +543,24 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                           color: isDark ? Colors.white : Colors.black87,
                         ),
                       ),
-                      Row(
-                        children: [
-                          if (VPNService.isScanning)
-                            Row(
-                              children: const [
-                                SizedBox(
-                                  width: 16,
-                                  height: 16,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
-                                  ),
-                                ),
-                                SizedBox(width: 8),
-                                Text(
-                                  'Scanning...',
-                                  style: TextStyle(color: Colors.blue, fontSize: 12),
-                                ),
-                              ],
+                      if (VPNService.isScanning)
+                        Row(
+                          children: const [
+                            SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
+                              ),
                             ),
-                          const SizedBox(width: 8),
-                          IconButton(
-                            icon: const Icon(Icons.refresh, color: Colors.blue),
-                            onPressed: isConnecting ? null : _refreshServers,
-                            tooltip: 'Refresh servers',
-                          ),
-                        ],
-                      ),
+                            SizedBox(width: 8),
+                            Text(
+                              'Scanning...',
+                              style: TextStyle(color: Colors.blue, fontSize: 12),
+                            ),
+                          ],
+                        ),
                     ],
                   ),
                 ),
@@ -597,87 +570,84 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                           child: Text(
                             VPNService.isScanning
                                 ? scanStatus
-                                : (l10n?.noServers ?? 'Tap refresh to scan servers'),
+                                : (l10n?.noServers ?? 'Tap Connect to scan servers'),
                             style: const TextStyle(color: Colors.grey, fontSize: 14),
                           ),
                         )
-                      : RefreshIndicator(
-                          onRefresh: _refreshServers,
-                          child: ListView.builder(
-                            padding: const EdgeInsets.symmetric(horizontal: 16),
-                            itemCount: displayServers.length,
-                            itemBuilder: (context, index) {
-                              final server = displayServers[index];
-                              final isCurrent = VPNService.isConnected &&
-                                  VPNService.currentConnectedConfig == server.config;
-                              
-                              return Card(
-                                color: isCurrent
-                                    ? Colors.green.withOpacity(0.2)
-                                    : (isDark ? const Color(0xFF1a1a2e) : Colors.white),
-                                margin: const EdgeInsets.only(bottom: 8),
-                                child: ListTile(
-                                  dense: true,
-                                  leading: Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                    decoration: BoxDecoration(
-                                      color: _getProtocolColor(server.protocol).withOpacity(0.2),
-                                      borderRadius: BorderRadius.circular(4),
-                                    ),
-                                    child: Text(
-                                      server.protocol,
-                                      style: TextStyle(
-                                        fontSize: 10,
-                                        color: _getProtocolColor(server.protocol),
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
+                      : ListView.builder(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          itemCount: displayServers.length,
+                          itemBuilder: (context, index) {
+                            final server = displayServers[index];
+                            final isCurrent = VPNService.isConnected &&
+                                VPNService.currentConnectedConfig == server.config;
+                            
+                            return Card(
+                              color: isCurrent
+                                  ? Colors.green.withOpacity(0.2)
+                                  : (isDark ? const Color(0xFF1a1a2e) : Colors.white),
+                              margin: const EdgeInsets.only(bottom: 8),
+                              child: ListTile(
+                                dense: true,
+                                leading: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: _getProtocolColor(server.protocol).withOpacity(0.2),
+                                    borderRadius: BorderRadius.circular(4),
                                   ),
-                                  title: Text(
-                                    server.name,
+                                  child: Text(
+                                    server.protocol,
                                     style: TextStyle(
-                                      color: isCurrent ? Colors.green : (isDark ? Colors.white : Colors.black87),
-                                      fontSize: 14,
-                                      fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                                      fontSize: 10,
+                                      color: _getProtocolColor(server.protocol),
+                                      fontWeight: FontWeight.bold,
                                     ),
-                                    overflow: TextOverflow.ellipsis,
                                   ),
-                                  subtitle: server.successRate > 0
-                                      ? Text(
-                                          'Success: ${(server.successRate * 100).toStringAsFixed(0)}%',
-                                          style: TextStyle(
-                                            fontSize: 11,
-                                            color: server.successRate > 0.7 ? Colors.green : Colors.orange,
-                                          ),
-                                        )
-                                      : null,
-                                  trailing: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      if (isCurrent)
-                                        const Icon(Icons.check_circle, size: 16, color: Colors.green),
-                                      const SizedBox(width: 4),
-                                      Icon(
-                                        Icons.signal_cellular_alt,
-                                        size: 16,
-                                        color: server.ping < 100
-                                            ? Colors.green
-                                            : server.ping < 200
-                                                ? Colors.orange
-                                                : Colors.red,
-                                      ),
-                                      const SizedBox(width: 4),
-                                      Text(
-                                        '${server.ping}ms',
-                                        style: const TextStyle(color: Colors.grey, fontSize: 12),
-                                      ),
-                                    ],
-                                  ),
-                                  onTap: (isConnecting || isCurrent) ? null : () => _connectToServer(server),
                                 ),
-                              );
-                            },
-                          ),
+                                title: Text(
+                                  server.name,
+                                  style: TextStyle(
+                                    color: isCurrent ? Colors.green : (isDark ? Colors.white : Colors.black87),
+                                    fontSize: 14,
+                                    fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                subtitle: server.successRate > 0
+                                    ? Text(
+                                        'Success: ${(server.successRate * 100).toStringAsFixed(0)}%',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: server.successRate > 0.7 ? Colors.green : Colors.orange,
+                                        ),
+                                      )
+                                    : null,
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    if (isCurrent)
+                                      const Icon(Icons.check_circle, size: 16, color: Colors.green),
+                                    const SizedBox(width: 4),
+                                    Icon(
+                                      Icons.signal_cellular_alt,
+                                      size: 16,
+                                      color: server.ping < 100
+                                          ? Colors.green
+                                          : server.ping < 200
+                                              ? Colors.orange
+                                              : Colors.red,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      '${server.ping}ms',
+                                      style: const TextStyle(color: Colors.grey, fontSize: 12),
+                                    ),
+                                  ],
+                                ),
+                                onTap: (isConnecting || isCurrent) ? null : () => _connectToServer(server),
+                              ),
+                            );
+                          },
                         ),
                 ),
               ],
@@ -696,6 +666,8 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
         return Colors.blue;
       case 'TROJAN':
         return Colors.purple;
+      case 'SS':
+        return Colors.orange;
       default:
         return Colors.grey;
     }
