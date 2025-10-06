@@ -1,10 +1,11 @@
-import 'qr_scanner_page.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_gen/gen_l10n/app_localizations.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'services/vpn_service.dart';
+import 'qr_scanner_page.dart';
+import 'screens/settings_page.dart';
 import 'dart:async';
 
 void main() => runApp(AsadVPNApp());
@@ -16,13 +17,17 @@ class AsadVPNApp extends StatefulWidget {
 
 class _AsadVPNAppState extends State<AsadVPNApp> {
   Locale _locale = const Locale('en');
+  ThemeMode _themeMode = ThemeMode.dark;
+
   void _changeLanguage(Locale locale) => setState(() => _locale = locale);
+  void _changeTheme(ThemeMode mode) => setState(() => _themeMode = mode);
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'AsadVPN',
       locale: _locale,
+      themeMode: _themeMode,
       localizationsDelegates: const [
         AppLocalizations.delegate,
         GlobalMaterialLocalizations.delegate,
@@ -32,33 +37,55 @@ class _AsadVPNAppState extends State<AsadVPNApp> {
       supportedLocales: const [Locale('en'), Locale('fa')],
       theme: ThemeData(
         primarySwatch: Colors.blue,
+        brightness: Brightness.light,
+        scaffoldBackgroundColor: Colors.grey[100],
+      ),
+      darkTheme: ThemeData(
+        primarySwatch: Colors.blue,
         brightness: Brightness.dark,
         scaffoldBackgroundColor: const Color(0xFF1a1a2e),
       ),
-      home: VPNHomePage(onLanguageChanged: _changeLanguage),
+      home: VPNHomePage(
+        onLanguageChanged: _changeLanguage,
+        onThemeChanged: _changeTheme,
+      ),
     );
   }
 }
 
 class VPNHomePage extends StatefulWidget {
   final void Function(Locale) onLanguageChanged;
-  const VPNHomePage({required this.onLanguageChanged, Key? key}) : super(key: key);
+  final void Function(ThemeMode) onThemeChanged;
+  
+  const VPNHomePage({
+    required this.onLanguageChanged,
+    required this.onThemeChanged,
+    Key? key,
+  }) : super(key: key);
 
   @override
   _VPNHomePageState createState() => _VPNHomePageState();
 }
 
-class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
+class _VPNHomePageState extends State<VPNHomePage> {
   String status = 'Disconnected';
   bool isConnecting = false;
   List<ServerInfo> displayServers = [];
   StreamSubscription? serversSub;
   StreamSubscription? connectionSub;
+  StreamSubscription? statusSub;
+  StreamSubscription? progressSub;
+  
+  int downloadSpeed = 0;
+  int uploadSpeed = 0;
+  int totalDownload = 0;
+  int totalUpload = 0;
+  String scanStatus = '';
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
+    WidgetsBinding.instance.addObserver(this as WidgetsBindingObserver);
     _initialize();
 
     serversSub = VPNService.serversStreamController.stream.listen((servers) {
@@ -68,21 +95,34 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
     connectionSub = VPNService.connectionStateController.stream.listen((connected) {
       if (mounted) _updateConnectionStatus();
     });
+
+    statusSub = VPNService.statusStreamController.stream.listen((status) {
+      if (mounted) {
+        setState(() {
+          downloadSpeed = status.downloadSpeed;
+          uploadSpeed = status.uploadSpeed;
+          totalDownload = status.download;
+          totalUpload = status.upload;
+        });
+      }
+    });
+
+    progressSub = VPNService.scanProgressController.stream.listen((progress) {
+      if (mounted) {
+        setState(() {
+          scanStatus = 'Testing servers... $progress/${VPNService.totalToScan}';
+        });
+      }
+    });
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
     serversSub?.cancel();
     connectionSub?.cancel();
+    statusSub?.cancel();
+    progressSub?.cancel();
     super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _updateConnectionStatus();
-    }
   }
 
   void _updateConnectionStatus() {
@@ -102,11 +142,28 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
   Future<void> _initialize() async {
     await VPNService.init();
     if (!mounted) return;
+    
     if (!VPNService.isSubscriptionValid) {
       _showSubscriptionDialog();
     } else {
       _updateConnectionStatus();
+      
+      // Try auto-connect to last good server
+      if (VPNService.lastGoodServer != null) {
+        final autoConnect = await _shouldAutoConnect();
+        if (autoConnect) {
+          setState(() => isConnecting = true);
+          await VPNService.connectToLastGoodServer();
+          setState(() => isConnecting = false);
+        }
+      }
     }
+  }
+
+  Future<bool> _shouldAutoConnect() async {
+    // Check settings for auto-connect preference
+    // For now, return false (we'll add settings in Phase 2)
+    return false;
   }
 
   Future<void> _toggleConnection() async {
@@ -133,6 +190,21 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _refreshServers() async {
+    if (VPNService.isScanning) return;
+    
+    setState(() {
+      isConnecting = true;
+      displayServers.clear();
+    });
+
+    await VPNService.scanAndSelectBestServer();
+    
+    if (mounted) {
+      setState(() => isConnecting = false);
+    }
+  }
+
   void _showSubscriptionDialog() {
     final controller = TextEditingController();
     showDialog(
@@ -148,13 +220,16 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
               decoration: InputDecoration(
                 labelText: AppLocalizations.of(ctx)?.subscriptionLink ?? 'Subscription Link',
                 border: const OutlineInputBorder(),
-                hintText: 'https://konabalan.pythonanywhere.com/sub/...',
+                hintText: 'https://...',
               ),
             ),
             const SizedBox(height: 16),
             ElevatedButton.icon(
               onPressed: () async {
-                final result = await Navigator.push(context, MaterialPageRoute(builder: (_) => QRScannerPage()));
+                final result = await Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => QRScannerPage()),
+                );
                 if (result != null) controller.text = result;
               },
               icon: const Icon(Icons.qr_code_scanner),
@@ -207,11 +282,20 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
     setState(() => isConnecting = false);
   }
 
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    if (bytes < 1024 * 1024 * 1024) return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+    return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
+  }
+
   @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    
     return Scaffold(
-      backgroundColor: const Color(0xFF1a1a2e),
+      backgroundColor: isDark ? const Color(0xFF1a1a2e) : Colors.grey[100],
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
@@ -223,6 +307,21 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
               PopupMenuItem(value: Locale('en'), child: Text('English')),
               PopupMenuItem(value: Locale('fa'), child: Text('فارسی')),
             ],
+          ),
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => SettingsPage(
+                    onThemeChanged: widget.onThemeChanged,
+                    onLanguageChanged: widget.onLanguageChanged,
+                  ),
+                ),
+              );
+            },
+            tooltip: 'Settings',
           ),
           if (VPNService.isSubscriptionValid)
             IconButton(
@@ -238,9 +337,21 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Text(l10n?.appTitle ?? 'AsadVPN', style: const TextStyle(fontSize: 36, fontWeight: FontWeight.bold, color: Colors.white)),
-                Text(l10n?.unlimited ?? 'UNLIMITED', style: const TextStyle(fontSize: 14, color: Colors.grey)),
-                const SizedBox(height: 50),
+                Text(
+                  l10n?.appTitle ?? 'AsadVPN',
+                  style: TextStyle(
+                    fontSize: 36,
+                    fontWeight: FontWeight.bold,
+                    color: isDark ? Colors.white : Colors.black87,
+                  ),
+                ),
+                Text(
+                  l10n?.unlimited ?? 'UNLIMITED',
+                  style: const TextStyle(fontSize: 14, color: Colors.grey),
+                ),
+                const SizedBox(height: 30),
+                
+                // Connection button
                 GestureDetector(
                   onTap: (!VPNService.isSubscriptionValid || isConnecting) ? null : _toggleConnection,
                   child: Container(
@@ -249,7 +360,9 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       gradient: LinearGradient(
-                        colors: VPNService.isConnected ? [Colors.green, Colors.greenAccent] : [Colors.red, Colors.redAccent],
+                        colors: VPNService.isConnected
+                            ? [Colors.green, Colors.greenAccent]
+                            : [Colors.red, Colors.redAccent],
                         begin: Alignment.topLeft,
                         end: Alignment.bottomRight,
                       ),
@@ -265,7 +378,11 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(VPNService.isConnected ? Icons.lock : Icons.power_settings_new, size: 60, color: Colors.white),
+                          Icon(
+                            VPNService.isConnected ? Icons.lock : Icons.power_settings_new,
+                            size: 60,
+                            color: Colors.white,
+                          ),
                           if (VPNService.isConnected)
                             Padding(
                               padding: const EdgeInsets.only(top: 8),
@@ -279,16 +396,109 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                     ),
                   ),
                 ),
+                
                 const SizedBox(height: 30),
+                
+                // Status text
                 Text(
-                  isConnecting ? (l10n?.connecting ?? 'A Moment Please...') : status,
-                  style: const TextStyle(fontSize: 18, color: Colors.white70),
-                ),
-                if (isConnecting)
-                  const Padding(
-                    padding: EdgeInsets.only(top: 20),
-                    child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(Colors.blue)),
+                  isConnecting ? (VPNService.isScanning ? scanStatus : (l10n?.connecting ?? 'Connecting...')) : status,
+                  style: TextStyle(
+                    fontSize: 18,
+                    color: isDark ? Colors.white70 : Colors.black87,
                   ),
+                ),
+                
+                // Progress indicator
+                if (isConnecting || VPNService.isScanning)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 20),
+                    child: Column(
+                      children: [
+                        const CircularProgressIndicator(
+                          valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
+                        ),
+                        if (VPNService.isScanning && VPNService.totalToScan > 0)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 12),
+                            child: LinearProgressIndicator(
+                              value: VPNService.scanProgress / VPNService.totalToScan,
+                              backgroundColor: Colors.grey[300],
+                              valueColor: const AlwaysStoppedAnimation<Color>(Colors.blue),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                
+                // Traffic stats
+                if (VPNService.isConnected)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 24),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                      decoration: BoxDecoration(
+                        color: isDark ? Colors.black26 : Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.1),
+                            blurRadius: 10,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceAround,
+                            children: [
+                              Column(
+                                children: [
+                                  Icon(Icons.arrow_downward, color: Colors.green, size: 20),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    '${_formatBytes(downloadSpeed)}/s',
+                                    style: const TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  Text(
+                                    _formatBytes(totalDownload),
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey[600],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              Column(
+                                children: [
+                                  Icon(Icons.arrow_upward, color: Colors.orange, size: 20),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    '${_formatBytes(uploadSpeed)}/s',
+                                    style: const TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  Text(
+                                    _formatBytes(totalUpload),
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey[600],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                
                 if (!VPNService.isSubscriptionValid)
                   Padding(
                     padding: const EdgeInsets.only(top: 20),
@@ -296,17 +506,32 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                       onPressed: _showSubscriptionDialog,
                       icon: const Icon(Icons.add),
                       label: Text(l10n?.enterSubscription ?? 'Enter Subscription'),
-                      style: ElevatedButton.styleFrom(backgroundColor: Colors.blue, padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue,
+                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                      ),
                     ),
                   ),
               ],
             ),
           ),
+          
+          // Server list with pull-to-refresh
           Container(
             height: 250,
-            decoration: const BoxDecoration(
-              color: Color(0xFF16213e),
-              borderRadius: BorderRadius.only(topLeft: Radius.circular(20), topRight: Radius.circular(20)),
+            decoration: BoxDecoration(
+              color: isDark ? const Color(0xFF16213e) : Colors.white,
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(20),
+                topRight: Radius.circular(20),
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.1),
+                  blurRadius: 10,
+                  offset: const Offset(0, -4),
+                ),
+              ],
             ),
             child: Column(
               children: [
@@ -315,13 +540,42 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(l10n?.serverList ?? 'Server List', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
-                      if (VPNService.isScanning)
-                        Row(children: const [
-                          SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.blue))),
-                          SizedBox(width: 8),
-                          Text('Scanning...', style: TextStyle(color: Colors.blue, fontSize: 12)),
-                        ]),
+                      Text(
+                        l10n?.serverList ?? 'Server List',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                          color: isDark ? Colors.white : Colors.black87,
+                        ),
+                      ),
+                      Row(
+                        children: [
+                          if (VPNService.isScanning)
+                            Row(
+                              children: const [
+                                SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
+                                  ),
+                                ),
+                                SizedBox(width: 8),
+                                Text(
+                                  'Scanning...',
+                                  style: TextStyle(color: Colors.blue, fontSize: 12),
+                                ),
+                              ],
+                            ),
+                          const SizedBox(width: 8),
+                          IconButton(
+                            icon: const Icon(Icons.refresh, color: Colors.blue),
+                            onPressed: isConnecting ? null : _refreshServers,
+                            tooltip: 'Refresh servers',
+                          ),
+                        ],
+                      ),
                     ],
                   ),
                 ),
@@ -329,48 +583,89 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                   child: displayServers.isEmpty
                       ? Center(
                           child: Text(
-                            VPNService.isConnected ? (l10n?.scanningServers ?? 'Scanning servers...') : (l10n?.noServers ?? 'No servers available'),
+                            VPNService.isConnected
+                                ? (l10n?.scanningServers ?? 'Pull down to scan servers')
+                                : (l10n?.noServers ?? 'No servers available'),
                             style: const TextStyle(color: Colors.grey, fontSize: 14),
                           ),
                         )
-                      : ListView.builder(
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          itemCount: displayServers.length,
-                          itemBuilder: (context, index) {
-                            final server = displayServers[index];
-                            final isCurrent = VPNService.isConnected && VPNService.currentConnectedConfig == server.config;
-                            return Card(
-                              color: isCurrent ? Colors.green.withOpacity(0.2) : const Color(0xFF1a1a2e),
-                              margin: const EdgeInsets.only(bottom: 8),
-                              child: ListTile(
-                                dense: true,
-                                leading: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: Colors.green.withOpacity(0.2),
-                                    borderRadius: BorderRadius.circular(4),
+                      : RefreshIndicator(
+                          onRefresh: _refreshServers,
+                          child: ListView.builder(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            itemCount: displayServers.length,
+                            itemBuilder: (context, index) {
+                              final server = displayServers[index];
+                              final isCurrent = VPNService.isConnected &&
+                                  VPNService.currentConnectedConfig == server.config;
+                              
+                              return Card(
+                                color: isCurrent
+                                    ? Colors.green.withOpacity(0.2)
+                                    : (isDark ? const Color(0xFF1a1a2e) : Colors.white),
+                                margin: const EdgeInsets.only(bottom: 8),
+                                child: ListTile(
+                                  dense: true,
+                                  leading: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: _getProtocolColor(server.protocol).withOpacity(0.2),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: Text(
+                                      server.protocol,
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        color: _getProtocolColor(server.protocol),
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
                                   ),
-                                  child: const Text('VLESS', style: TextStyle(fontSize: 10, color: Colors.green, fontWeight: FontWeight.bold)),
+                                  title: Text(
+                                    server.name,
+                                    style: TextStyle(
+                                      color: isCurrent ? Colors.green : (isDark ? Colors.white : Colors.black87),
+                                      fontSize: 14,
+                                      fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  subtitle: server.successRate > 0
+                                      ? Text(
+                                          'Success: ${(server.successRate * 100).toStringAsFixed(0)}%',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            color: server.successRate > 0.7 ? Colors.green : Colors.orange,
+                                          ),
+                                        )
+                                      : null,
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (isCurrent)
+                                        const Icon(Icons.check_circle, size: 16, color: Colors.green),
+                                      const SizedBox(width: 4),
+                                      Icon(
+                                        Icons.signal_cellular_alt,
+                                        size: 16,
+                                        color: server.ping < 100
+                                            ? Colors.green
+                                            : server.ping < 200
+                                                ? Colors.orange
+                                                : Colors.red,
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        '${server.ping}ms',
+                                        style: const TextStyle(color: Colors.grey, fontSize: 12),
+                                      ),
+                                    ],
+                                  ),
+                                  onTap: (isConnecting || isCurrent) ? null : () => _connectToServer(server),
                                 ),
-                                title: Text(
-                                  server.name,
-                                  style: TextStyle(color: isCurrent ? Colors.green : Colors.white, fontSize: 14, fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal),
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                trailing: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    if (isCurrent) const Icon(Icons.check_circle, size: 16, color: Colors.green),
-                                    const SizedBox(width: 4),
-                                    Icon(Icons.signal_cellular_alt, size: 16, color: server.ping < 100 ? Colors.green : server.ping < 200 ? Colors.orange : Colors.red),
-                                    const SizedBox(width: 4),
-                                    Text('${server.ping}ms', style: const TextStyle(color: Colors.grey, fontSize: 12)),
-                                  ],
-                                ),
-                                onTap: (isConnecting || isCurrent) ? null : () => _connectToServer(server),
-                              ),
-                            );
-                          },
+                              );
+                            },
+                          ),
                         ),
                 ),
               ],
@@ -379,5 +674,18 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
         ],
       ),
     );
+  }
+
+  Color _getProtocolColor(String protocol) {
+    switch (protocol) {
+      case 'VLESS':
+        return Colors.green;
+      case 'VMESS':
+        return Colors.blue;
+      case 'TROJAN':
+        return Colors.purple;
+      default:
+        return Colors.grey;
+    }
   }
 }
