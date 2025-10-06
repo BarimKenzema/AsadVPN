@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_v2ray/flutter_v2ray.dart';
+import 'package:flutter_v2ray_client/flutter_v2ray_client.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -64,7 +64,7 @@ class VPNService {
       
       final prefs = await SharedPreferences.getInstance();
       currentSubscriptionLink = prefs.getString('subscription_link');
-      debugPrint('🔵 Loaded subscription link: ${currentSubscriptionLink != null ? "EXISTS (${currentSubscriptionLink!.substring(0, min(50, currentSubscriptionLink!.length))}...)" : "NULL"}');
+      debugPrint('🔵 Loaded subscription link: ${currentSubscriptionLink != null ? "EXISTS" : "NULL"}');
       
       if (currentSubscriptionLink != null && currentSubscriptionLink!.isNotEmpty) {
         debugPrint('🔵 Validating subscription...');
@@ -87,7 +87,7 @@ class VPNService {
     }
     
     try {
-      debugPrint('🔵 Fetching subscription from: ${currentSubscriptionLink!.substring(0, min(50, currentSubscriptionLink!.length))}...');
+      debugPrint('🔵 Fetching subscription...');
       
       final resp = await http.get(
         Uri.parse(currentSubscriptionLink!),
@@ -95,21 +95,17 @@ class VPNService {
       ).timeout(const Duration(seconds: 20));
 
       debugPrint('🔵 Response status: ${resp.statusCode}');
-      debugPrint('🔵 Response length: ${resp.body.length} bytes');
-      debugPrint('🔵 First 100 chars: ${resp.body.substring(0, min(100, resp.body.length))}');
 
       if (resp.statusCode != 200 || resp.body.contains('<!DOCTYPE')) {
-        debugPrint('❌ Invalid response (HTML or bad status)');
+        debugPrint('❌ Invalid response');
         isSubscriptionValid = false;
         return false;
       }
 
       var content = resp.body;
       if (!content.contains('://')) {
-        debugPrint('🔵 Content appears to be base64, decoding...');
         try {
           content = utf8.decode(base64.decode(content.trim()));
-          debugPrint('🔵 Decoded length: ${content.length}');
         } catch (e) {
           debugPrint('❌ Failed to decode base64: $e');
         }
@@ -120,8 +116,6 @@ class VPNService {
           .where((l) => l.isNotEmpty && !l.startsWith('#'))
           .toList();
       
-      debugPrint('🔵 Total lines after filtering: ${lines.length}');
-      
       final vless = lines.where((l) => l.toLowerCase().startsWith('vless://')).toList();
       final vmess = lines.where((l) => l.toLowerCase().startsWith('vmess://')).toList();
       final trojan = lines.where((l) => l.toLowerCase().startsWith('trojan://')).toList();
@@ -131,15 +125,10 @@ class VPNService {
       configServers = vless.isNotEmpty ? vless : (vmess.isNotEmpty ? vmess : (trojan.isNotEmpty ? trojan : lines));
       debugPrint('🔵 Using ${configServers.length} servers');
       
-      if (configServers.isNotEmpty) {
-        debugPrint('🔵 First server: ${configServers.first.substring(0, min(80, configServers.first.length))}...');
-      }
-      
       isSubscriptionValid = configServers.isNotEmpty;
       return isSubscriptionValid;
     } catch (e, stack) {
       debugPrint('❌ Validation error: $e');
-      debugPrint('Stack: $stack');
       isSubscriptionValid = false;
       return false;
     }
@@ -155,15 +144,11 @@ class VPNService {
         return false;
       }
       
-      debugPrint('🔵 Link: ${link.substring(0, min(50, link.length))}...');
-      
       final prefs = await SharedPreferences.getInstance();
       currentSubscriptionLink = link;
       await prefs.setString('subscription_link', link);
       
-      debugPrint('🔵 Saved to SharedPreferences, verifying...');
-      final saved = prefs.getString('subscription_link');
-      debugPrint('🔵 Verification read: ${saved != null ? "SUCCESS" : "FAILED"}');
+      debugPrint('🔵 Saved to SharedPreferences');
       
       final ok = await validateSubscription();
       if (!ok) {
@@ -176,7 +161,6 @@ class VPNService {
       return ok;
     } catch (e, stack) {
       debugPrint('❌ Save error: $e');
-      debugPrint('Stack: $stack');
       return false;
     }
   }
@@ -191,15 +175,22 @@ class VPNService {
     }
     
     isScanning = true;
-    fastestServers.clear();
-    serversStreamController.add([]);
+    // Don't clear existing servers, just update them
+    // fastestServers.clear();
+    // serversStreamController.add([]);
 
     final shuffled = List<String>.from(configServers)..shuffle(Random());
-    final batch = shuffled.take(min(10, shuffled.length)).toList();
+    // Test 20 servers instead of 10 for more options
+    final batch = shuffled.take(min(20, shuffled.length)).toList();
     
     debugPrint('🔵 Testing ${batch.length} servers...');
 
-    final tests = batch.map((cfg) => _testServerWithPing(cfg)).toList();
+    // Test all servers in parallel with 5-second timeout
+    final tests = batch.map((cfg) => _testServerWithPing(cfg).timeout(
+      const Duration(seconds: 5),
+      onTimeout: () => null,
+    )).toList();
+    
     final results = await Future.wait(tests);
 
     final working = results.whereType<ServerInfo>().toList()
@@ -222,18 +213,13 @@ class VPNService {
 
   static Future<ServerInfo?> _testServerWithPing(String uri) async {
     try {
-      debugPrint('🔵 Testing server: ${uri.substring(0, min(50, uri.length))}...');
-      
       final parser = V2ray.parseFromURL(uri);
       final config = parser.getFullConfiguration();
       
-      debugPrint('🔵 Generated config for ${parser.remark}');
-      
       final delay = await v2ray.getServerDelay(config: config);
-      
-      debugPrint('🔵 ${parser.remark}: ${delay}ms');
 
-      if (delay != -1) {
+      if (delay != -1 && delay < 5000) {
+        debugPrint('✅ ${parser.remark}: ${delay}ms');
         return ServerInfo(
           config: uri,
           protocol: 'VLESS',
@@ -243,7 +229,6 @@ class VPNService {
       }
       return null;
     } catch (e) {
-      debugPrint('❌ Test error: $e');
       return null;
     }
   }
@@ -307,8 +292,9 @@ class VPNService {
       isConnected = false;
       currentConnectedConfig = null;
       currentConnectedPing = null;
-      fastestServers.clear();
-      serversStreamController.add([]);
+      // Keep the servers list - don't clear it
+      // fastestServers.clear();
+      // serversStreamController.add([]);
       connectionStateController.add(false);
     }
   }
