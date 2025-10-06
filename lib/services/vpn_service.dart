@@ -50,6 +50,10 @@ class VPNService {
   static int sessionUpload = 0;
   static List<ConnectionStats> dailyStats = [];
 
+  // Background scanning
+  static Timer? _backgroundScanTimer;
+  static Timer? _healthCheckTimer;
+
   static final StreamController<List<ServerInfo>> serversStreamController =
       StreamController<List<ServerInfo>>.broadcast();
   static final StreamController<bool> connectionStateController =
@@ -74,7 +78,25 @@ class VPNService {
       isConnected = newIsConnected;
       connectionStateController.add(isConnected);
       debugPrint('🔵 V2Ray status changed to: ${status.state}');
+      
+      // If disconnected unexpectedly, try to reconnect
+      if (!newIsConnected && currentConnectedConfig != null) {
+        _handleDisconnect();
+      }
     }
+  }
+
+  static void _handleDisconnect() {
+    debugPrint('⚠️ Unexpected disconnect, attempting reconnect...');
+    Future.delayed(const Duration(seconds: 2), () async {
+      if (!isConnected && fastestServers.isNotEmpty) {
+        // Try the fastest available server
+        await connect(
+          vlessUri: fastestServers.first.config,
+          ping: fastestServers.first.ping,
+        );
+      }
+    });
   }
 
   static Future<void> init() async {
@@ -105,11 +127,44 @@ class VPNService {
         if (valid) {
           // Pre-test top 3 servers on startup
           await _preTestTopServers();
+          
+          // Start background scanning every 16 minutes
+          _startBackgroundScanning();
+          
+          // Start health check every 10 seconds
+          _startHealthCheck();
         }
       }
     } catch (e, stack) {
       debugPrint('❌ Init error: $e\n$stack');
     }
+  }
+
+  static void _startBackgroundScanning() {
+    _backgroundScanTimer?.cancel();
+    _backgroundScanTimer = Timer.periodic(const Duration(minutes: 16), (timer) {
+      if (!isScanning && configServers.isNotEmpty) {
+        debugPrint('🔵 Background scan triggered');
+        scanAndSelectBestServer(connectImmediately: false);
+      }
+    });
+  }
+
+  static void _startHealthCheck() {
+    _healthCheckTimer?.cancel();
+    _healthCheckTimer = Timer.periodic(const Duration(seconds: 10), (timer) async {
+      if (isConnected) {
+        try {
+          final delay = await v2ray.getConnectedServerDelay();
+          if (delay == -1 || delay > 5000) {
+            debugPrint('⚠️ Connection unhealthy (${delay}ms), reconnecting...');
+            _handleDisconnect();
+          }
+        } catch (e) {
+          debugPrint('❌ Health check error: $e');
+        }
+      }
+    });
   }
 
   static Future<void> _loadCache() async {
@@ -169,12 +224,16 @@ class VPNService {
     debugPrint('🔵 Pre-testing top 3 servers...');
     final toTest = topServers.take(3).toList();
     
-    for (var config in toTest) {
+    // Test in parallel
+    final futures = toTest.map((config) async {
       final cached = serverCache[config];
       if (cached == null || cached.isStale) {
-        await _testServerWithPing(config);
+        return await _testServerWithPing(config);
       }
-    }
+      return null;
+    }).toList();
+    
+    await Future.wait(futures);
   }
 
   static Future<bool> validateSubscription() async {
@@ -207,7 +266,6 @@ class VPNService {
           .where((l) => l.isNotEmpty && !l.startsWith('#'))
           .toList();
 
-      // FIXED: Include ALL protocol types, not just one
       final vless = lines.where((l) => l.toLowerCase().startsWith('vless://')).toList();
       final vmess = lines.where((l) => l.toLowerCase().startsWith('vmess://')).toList();
       final trojan = lines.where((l) => l.toLowerCase().startsWith('trojan://')).toList();
@@ -215,10 +273,8 @@ class VPNService {
 
       debugPrint('🔵 Found: ${vless.length} VLESS, ${vmess.length} VMESS, ${trojan.length} Trojan, ${ss.length} SS');
 
-      // Include ALL protocols, not just one type
       configServers = [...vless, ...vmess, ...trojan, ...ss];
 
-      // If no supported protocols found, use all lines
       if (configServers.isEmpty) {
         configServers = lines;
       }
@@ -245,6 +301,8 @@ class VPNService {
       if (!ok) {
         await prefs.remove('subscription_link');
         currentSubscriptionLink = null;
+      } else {
+        _startBackgroundScanning();
       }
       return ok;
     } catch (e) {
@@ -252,56 +310,72 @@ class VPNService {
     }
   }
 
-  static Future<Map<String, dynamic>> scanAndSelectBestServer() async {
+  static Future<Map<String, dynamic>> scanAndSelectBestServer({bool connectImmediately = true}) async {
     if (configServers.isEmpty) {
       return {'success': false, 'error': 'No servers'};
     }
 
     isScanning = true;
     scanProgress = 0;
-    fastestServers.clear(); // Clear old results
+    if (connectImmediately) {
+      fastestServers.clear();
+    }
     
-    // Prioritize: top servers > cached servers > new servers
     final prioritized = _prioritizeServers();
-    final batch = prioritized.take(min(20, prioritized.length)).toList();
+    final batch = prioritized.take(min(50, prioritized.length)).toList();
     
     totalToScan = batch.length;
     scanProgressController.add(0);
 
-    final List<ServerInfo?> results = [];
-    
-    for (int i = 0; i < batch.length; i++) {
-      final result = await _testServerWithPing(batch[i]).timeout(
+    bool hasConnected = false;
+    final List<ServerInfo> workingServers = [];
+
+    // Process in batches of 5 parallel tests
+    const batchSize = 5;
+    for (int i = 0; i < batch.length; i += batchSize) {
+      final end = min(i + batchSize, batch.length);
+      final chunk = batch.sublist(i, end);
+
+      // Test 5 servers in parallel
+      final futures = chunk.map((config) => _testServerWithPing(config).timeout(
         const Duration(seconds: 5),
         onTimeout: () => null,
-      );
-      results.add(result);
-      scanProgress = i + 1;
-      scanProgressController.add(scanProgress);
-      
-      // Update UI incrementally
-      if (result != null) {
-        fastestServers.add(result);
-        fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
-        serversStreamController.add(List.from(fastestServers)); // Send copy
+      )).toList();
+
+      final results = await Future.wait(futures);
+
+      for (var result in results) {
+        if (result != null) {
+          workingServers.add(result);
+          fastestServers.add(result);
+          fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+          serversStreamController.add(List.from(fastestServers));
+
+          // Connect to first good server immediately
+          if (connectImmediately && !hasConnected && !isConnected) {
+            hasConnected = true;
+            debugPrint('✅ Found first good server, connecting...');
+            unawaited(connect(vlessUri: result.config, ping: result.ping));
+          }
+        }
       }
+
+      scanProgress = end;
+      scanProgressController.add(scanProgress);
     }
 
-    final working = results.whereType<ServerInfo>().toList()
-      ..sort((a, b) => a.ping.compareTo(b.ping));
-
-    fastestServers = working;
-    serversStreamController.add(List.from(fastestServers)); // Send copy
+    workingServers.sort((a, b) => a.ping.compareTo(b.ping));
+    fastestServers = workingServers;
+    serversStreamController.add(List.from(fastestServers));
     isScanning = false;
 
-    if (working.isNotEmpty) {
-      // Update top servers list
-      await _updateTopServers(working.map((s) => s.config).toList());
+    if (workingServers.isNotEmpty) {
+      await _updateTopServers(workingServers.map((s) => s.config).toList());
       
       return {
         'success': true,
-        'server': working.first.config,
-        'ping': working.first.ping
+        'server': workingServers.first.config,
+        'ping': workingServers.first.ping
       };
     }
 
@@ -351,7 +425,6 @@ class VPNService {
       // Check cache first
       final cached = serverCache[uri];
       if (cached != null && !cached.isStale) {
-        debugPrint('✅ [CACHED] ${cached.name}: ${cached.lastPing}ms');
         return ServerInfo(
           config: uri,
           protocol: cached.protocol,
@@ -365,9 +438,6 @@ class VPNService {
       final delay = await v2ray.getServerDelay(config: config);
 
       if (delay != -1 && delay < 5000) {
-        debugPrint('✅ ${parser.remark}: ${delay}ms');
-
-        // Update cache
         final existing = serverCache[uri];
         serverCache[uri] = ServerCache(
           config: uri,
@@ -379,7 +449,7 @@ class VPNService {
           failureCount: existing?.failureCount ?? 0,
           lastConnected: existing?.lastConnected,
         );
-        await _saveCache();
+        unawaited(_saveCache());
 
         return ServerInfo(
           config: uri,
@@ -389,7 +459,6 @@ class VPNService {
           successRate: serverCache[uri]!.successRate,
         );
       } else {
-        // Update failure count
         final existing = serverCache[uri];
         if (existing != null) {
           serverCache[uri] = ServerCache(
@@ -401,7 +470,7 @@ class VPNService {
             successCount: existing.successCount,
             failureCount: existing.failureCount + 1,
           );
-          await _saveCache();
+          unawaited(_saveCache());
         }
       }
       return null;
@@ -441,7 +510,6 @@ class VPNService {
         currentConnectedConfig = vlessUri;
         currentConnectedPing = ping;
 
-        // Update success count & last connected
         final existing = serverCache[vlessUri];
         if (existing != null) {
           serverCache[vlessUri] = ServerCache(
@@ -466,18 +534,16 @@ class VPNService {
           );
         }
 
-        // Save as last good server
         lastGoodServer = vlessUri;
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString('last_good_server', vlessUri);
-        await _saveCache();
+        unawaited(_saveCache());
 
         debugPrint('✅ Connected successfully');
         return true;
       }
       return false;
     } catch (e) {
-      // Update failure count
       final existing = serverCache[vlessUri];
       if (existing != null) {
         serverCache[vlessUri] = ServerCache(
@@ -489,7 +555,7 @@ class VPNService {
           successCount: existing.successCount,
           failureCount: existing.failureCount + 1,
         );
-        await _saveCache();
+        unawaited(_saveCache());
       }
       debugPrint('❌ Connection error: $e');
       return false;
@@ -510,7 +576,6 @@ class VPNService {
 
   static Future<void> disconnect() async {
     try {
-      // Save session stats
       if (isConnected && (sessionDownload > 0 || sessionUpload > 0)) {
         final today = DateTime.now();
         final todayStats = dailyStats.firstWhere(
@@ -552,4 +617,16 @@ class VPNService {
       connectionStateController.add(false);
     }
   }
+
+  static void dispose() {
+    _backgroundScanTimer?.cancel();
+    _healthCheckTimer?.cancel();
+    serversStreamController.close();
+    connectionStateController.close();
+    statusStreamController.close();
+    scanProgressController.close();
+  }
 }
+
+// Helper to avoid warnings for unawaited futures
+void unawaited(Future<void> future) {}
