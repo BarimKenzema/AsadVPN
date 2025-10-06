@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_v2ray_client/flutter_v2ray_client.dart';
+import 'package:flutter_v2ray/flutter_v2ray.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -175,17 +175,12 @@ class VPNService {
     }
     
     isScanning = true;
-    // Don't clear existing servers, just update them
-    // fastestServers.clear();
-    // serversStreamController.add([]);
 
     final shuffled = List<String>.from(configServers)..shuffle(Random());
-    // Test 20 servers instead of 10 for more options
     final batch = shuffled.take(min(20, shuffled.length)).toList();
     
     debugPrint('🔵 Testing ${batch.length} servers...');
 
-    // Test all servers in parallel with 5-second timeout
     final tests = batch.map((cfg) => _testServerWithPing(cfg).timeout(
       const Duration(seconds: 5),
       onTimeout: () => null,
@@ -292,9 +287,6 @@ class VPNService {
       isConnected = false;
       currentConnectedConfig = null;
       currentConnectedPing = null;
-      // Keep the servers list - don't clear it
-      // fastestServers.clear();
-      // serversStreamController.add([]);
       connectionStateController.add(false);
     }
   }
