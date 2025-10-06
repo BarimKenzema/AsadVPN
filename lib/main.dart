@@ -67,7 +67,7 @@ class VPNHomePage extends StatefulWidget {
   _VPNHomePageState createState() => _VPNHomePageState();
 }
 
-class _VPNHomePageState extends State<VPNHomePage> {
+class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
   String status = 'Disconnected';
   bool isConnecting = false;
   List<ServerInfo> displayServers = [];
@@ -85,7 +85,7 @@ class _VPNHomePageState extends State<VPNHomePage> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this as WidgetsBindingObserver);
+    WidgetsBinding.instance.addObserver(this);
     _initialize();
 
     serversSub = VPNService.serversStreamController.stream.listen((servers) {
@@ -118,11 +118,19 @@ class _VPNHomePageState extends State<VPNHomePage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     serversSub?.cancel();
     connectionSub?.cancel();
     statusSub?.cancel();
     progressSub?.cancel();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _updateConnectionStatus();
+    }
   }
 
   void _updateConnectionStatus() {
@@ -174,6 +182,7 @@ class _VPNHomePageState extends State<VPNHomePage> {
       setState(() {
         isConnecting = true;
         status = l10n?.connecting ?? 'A Moment Please...';
+        scanStatus = 'Preparing...';
       });
 
       final result = await VPNService.scanAndSelectBestServer();
@@ -195,7 +204,7 @@ class _VPNHomePageState extends State<VPNHomePage> {
     
     setState(() {
       isConnecting = true;
-      displayServers.clear();
+      scanStatus = 'Refreshing...';
     });
 
     await VPNService.scanAndSelectBestServer();
@@ -420,10 +429,13 @@ class _VPNHomePageState extends State<VPNHomePage> {
                         if (VPNService.isScanning && VPNService.totalToScan > 0)
                           Padding(
                             padding: const EdgeInsets.only(top: 12),
-                            child: LinearProgressIndicator(
-                              value: VPNService.scanProgress / VPNService.totalToScan,
-                              backgroundColor: Colors.grey[300],
-                              valueColor: const AlwaysStoppedAnimation<Color>(Colors.blue),
+                            child: SizedBox(
+                              width: 200,
+                              child: LinearProgressIndicator(
+                                value: VPNService.scanProgress / VPNService.totalToScan,
+                                backgroundColor: Colors.grey[300],
+                                valueColor: const AlwaysStoppedAnimation<Color>(Colors.blue),
+                              ),
                             ),
                           ),
                       ],
@@ -583,9 +595,9 @@ class _VPNHomePageState extends State<VPNHomePage> {
                   child: displayServers.isEmpty
                       ? Center(
                           child: Text(
-                            VPNService.isConnected
-                                ? (l10n?.scanningServers ?? 'Pull down to scan servers')
-                                : (l10n?.noServers ?? 'No servers available'),
+                            VPNService.isScanning
+                                ? scanStatus
+                                : (l10n?.noServers ?? 'Tap refresh to scan servers'),
                             style: const TextStyle(color: Colors.grey, fontSize: 14),
                           ),
                         )
