@@ -151,54 +151,70 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
     await VPNService.init();
     if (!mounted) return;
     
-    if (!VPNService.isSubscriptionValid) {
+    // DON'T check subscription validity here
+    // Only show dialog if there's NO subscription link at all
+    if (VPNService.currentSubscriptionLink == null || VPNService.currentSubscriptionLink!.isEmpty) {
       _showSubscriptionDialog();
     } else {
+      // We have a subscription link saved, just update UI
       _updateConnectionStatus();
       
-      // Try auto-connect to last good server
-      if (VPNService.lastGoodServer != null) {
-        final autoConnect = await _shouldAutoConnect();
-        if (autoConnect) {
-          setState(() => isConnecting = true);
-          await VPNService.connectToLastGoodServer();
-          setState(() => isConnecting = false);
-        }
-      }
+      // Try auto-connect to last good server if desired
+      // (disabled for now, can be enabled in settings later)
+      // if (VPNService.lastGoodServer != null) {
+      //   final autoConnect = await _shouldAutoConnect();
+      //   if (autoConnect) {
+      //     setState(() => isConnecting = true);
+      //     await VPNService.connectToLastGoodServer();
+      //     setState(() => isConnecting = false);
+      //   }
+      // }
     }
-  }
-
-  Future<bool> _shouldAutoConnect() async {
-    // Check settings for auto-connect preference
-    // For now, return false (we'll add settings in Phase 2)
-    return false;
   }
 
   Future<void> _toggleConnection() async {
     final l10n = AppLocalizations.of(context);
+    
     if (VPNService.isConnected) {
       await VPNService.disconnect();
-    } else {
-      setState(() {
-        isConnecting = true;
-        status = l10n?.connecting ?? 'A Moment Please...';
-        scanStatus = 'Preparing...';
-      });
-
-      final result = await VPNService.scanAndSelectBestServer();
-      if (!mounted) return;
-
-      if (result['success'] != true) {
-        setState(() {
-          status = l10n?.noServers ?? 'No servers available';
-        });
-      }
-      setState(() => isConnecting = false);
+      return;
     }
+    
+    // Check if subscription link exists before attempting connection
+    if (VPNService.currentSubscriptionLink == null || VPNService.currentSubscriptionLink!.isEmpty) {
+      _showSubscriptionDialog();
+      return;
+    }
+
+    setState(() {
+      isConnecting = true;
+      status = l10n?.connecting ?? 'A Moment Please...';
+      scanStatus = 'Preparing...';
+    });
+
+    // THIS is where validation happens (inside scanAndSelectBestServer)
+    final result = await VPNService.scanAndSelectBestServer();
+    if (!mounted) return;
+
+    if (result['success'] != true) {
+      final error = result['error'] ?? 'Unknown error';
+      setState(() {
+        status = error.contains('subscription') || error.contains('Invalid')
+            ? (l10n?.invalidSubscription ?? 'Invalid subscription')
+            : (l10n?.noServers ?? 'No servers available');
+      });
+      
+      // If subscription validation failed, show dialog
+      if (error.contains('subscription') || error.contains('Invalid')) {
+        _showSubscriptionDialog();
+      }
+    }
+    
+    setState(() => isConnecting = false);
   }
 
   void _showSubscriptionDialog() {
-    final controller = TextEditingController();
+    final controller = TextEditingController(text: VPNService.currentSubscriptionLink ?? '');
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -241,19 +257,36 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
           TextButton(
             onPressed: () async {
               if (controller.text.isNotEmpty) {
+                // Show loading
+                showDialog(
+                  context: ctx,
+                  barrierDismissible: false,
+                  builder: (_) => const Center(child: CircularProgressIndicator()),
+                );
+                
                 final ok = await VPNService.saveSubscriptionLink(controller.text);
+                
+                // Close loading dialog
+                Navigator.pop(ctx);
+                
                 if (ok) {
+                  // Close subscription dialog
                   Navigator.pop(ctx);
                   _updateConnectionStatus();
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                    content: Text(AppLocalizations.of(context)?.subscriptionActivated ?? 'Subscription activated!'),
-                    backgroundColor: Colors.green,
-                  ));
+                  
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(AppLocalizations.of(context)?.subscriptionActivated ?? 'Subscription activated!'),
+                      backgroundColor: Colors.green,
+                    ));
+                  }
                 } else {
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                    content: Text(AppLocalizations.of(context)?.invalidSubscription ?? 'Invalid subscription'),
-                    backgroundColor: Colors.red,
-                  ));
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(AppLocalizations.of(context)?.invalidSubscription ?? 'Invalid subscription'),
+                      backgroundColor: Colors.red,
+                    ));
+                  }
                 }
               }
             },
@@ -315,7 +348,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
             },
             tooltip: 'Settings',
           ),
-          if (VPNService.isSubscriptionValid)
+          if (VPNService.currentSubscriptionLink != null && VPNService.currentSubscriptionLink!.isNotEmpty)
             IconButton(
               icon: const Icon(Icons.card_membership),
               onPressed: _showSubscriptionDialog,
@@ -345,7 +378,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                 
                 // Connection button
                 GestureDetector(
-                  onTap: (!VPNService.isSubscriptionValid || isConnecting) ? null : _toggleConnection,
+                  onTap: isConnecting ? null : _toggleConnection,
                   child: Container(
                     width: 150,
                     height: 150,
@@ -494,7 +527,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                     ),
                   ),
                 
-                if (!VPNService.isSubscriptionValid)
+                if (VPNService.currentSubscriptionLink == null || VPNService.currentSubscriptionLink!.isEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 20),
                     child: ElevatedButton.icon(
@@ -511,7 +544,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
             ),
           ),
           
-          // Server list (NO REFRESH BUTTON)
+          // Server list
           Container(
             height: 250,
             decoration: BoxDecoration(
