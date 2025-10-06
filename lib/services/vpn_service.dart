@@ -6,7 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_v2ray/flutter_v2ray.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-import '../models/server_cache.dart'; // This already has ConnectionStats
+import '../models/server_cache.dart';
 
 class ServerInfo {
   final String config;
@@ -43,8 +43,8 @@ class VPNService {
   // Caching
   static Map<String, ServerCache> serverCache = {};
   static String? lastGoodServer;
-  static List<String> topServers = []; // The 11 working servers
-  static Set<String> scannedServers = {}; // ALL servers ever scanned
+  static List<String> topServers = [];
+  static Set<String> scannedServers = {};
 
   // Stats
   static int sessionDownload = 0;
@@ -56,6 +56,7 @@ class VPNService {
   static Timer? _healthCheckTimer;
   static bool _isBackgroundScanning = false;
   static DateTime? _lastConnectionTime;
+  static bool _isManualDisconnect = false; // NEW: Track manual disconnects
 
   static final StreamController<List<ServerInfo>> serversStreamController =
       StreamController<List<ServerInfo>>.broadcast();
@@ -85,6 +86,7 @@ class VPNService {
       // Start background scan 11 seconds after successful connection
       if (newIsConnected && _lastConnectionTime == null) {
         _lastConnectionTime = DateTime.now();
+        _isManualDisconnect = false; // Reset flag on new connection
         debugPrint('🔵 Connection successful, will start background scan in 11 seconds...');
         Future.delayed(const Duration(seconds: 11), () {
           if (isConnected && fastestServers.length < 11) {
@@ -94,9 +96,12 @@ class VPNService {
         });
       }
       
-      // If disconnected unexpectedly, try to reconnect
-      if (!newIsConnected && currentConnectedConfig != null) {
+      // If disconnected unexpectedly (NOT manual), try to reconnect
+      if (!newIsConnected && currentConnectedConfig != null && !_isManualDisconnect) {
+        debugPrint('⚠️ Unexpected disconnect detected');
         _handleDisconnect();
+      } else if (!newIsConnected && _isManualDisconnect) {
+        debugPrint('🔵 Manual disconnect, no reconnection needed');
       }
     }
   }
@@ -105,7 +110,7 @@ class VPNService {
     debugPrint('⚠️ Unexpected disconnect, attempting reconnect...');
     _lastConnectionTime = null;
     Future.delayed(const Duration(seconds: 2), () async {
-      if (!isConnected && fastestServers.isNotEmpty) {
+      if (!isConnected && fastestServers.isNotEmpty && !_isManualDisconnect) {
         await connect(
           vlessUri: fastestServers.first.config,
           ping: fastestServers.first.ping,
@@ -136,7 +141,7 @@ class VPNService {
         topServers = topServersList;
         debugPrint('🔵 Loaded ${topServers.length} top servers from cache');
         
-        // Load them into fastestServers for display (with cached pings)
+        // Load them into fastestServers for display
         fastestServers = topServersList
             .map((config) {
               final cached = serverCache[config];
@@ -161,7 +166,6 @@ class VPNService {
         }
       }
 
-      // DON'T validate subscription here - only when user clicks connect
       debugPrint('🔵 Init complete. Subscription link exists: ${currentSubscriptionLink != null}');
       
       // Start health check
@@ -196,7 +200,7 @@ class VPNService {
   static void _startHealthCheck() {
     _healthCheckTimer?.cancel();
     _healthCheckTimer = Timer.periodic(const Duration(seconds: 10), (timer) async {
-      if (isConnected) {
+      if (isConnected && !_isManualDisconnect) {
         try {
           final delay = await v2ray.getConnectedServerDelay();
           if (delay == -1 || delay > 5000) {
@@ -326,7 +330,6 @@ class VPNService {
       currentSubscriptionLink = link;
       await prefs.setString('subscription_link', link);
 
-      // Validate immediately after saving
       final valid = await validateSubscription();
       if (!valid) {
         await prefs.remove('subscription_link');
@@ -342,12 +345,10 @@ class VPNService {
   }
 
   static Future<Map<String, dynamic>> scanAndSelectBestServer({bool connectImmediately = true}) async {
-    // Validate subscription first (THIS IS WHERE VALIDATION HAPPENS)
     if (currentSubscriptionLink == null || currentSubscriptionLink!.isEmpty) {
       return {'success': false, 'error': 'No subscription link'};
     }
 
-    // Only validate if we don't have configServers loaded
     if (configServers.isEmpty) {
       final valid = await validateSubscription();
       if (!valid) {
@@ -357,55 +358,59 @@ class VPNService {
 
     isScanning = true;
     scanProgress = 0;
-    _lastConnectionTime = null; // Reset connection time
+    _lastConnectionTime = null;
     
-    totalToScan = 0; // Hide progress counter
+    totalToScan = 0;
     scanProgressController.add(0);
 
-    // Step 1: If we have saved top servers, test them first (3 by 3)
+    // Step 1: Test saved top servers first (3 by 3)
     if (topServers.isNotEmpty) {
       debugPrint('🔵 Testing saved top servers (${topServers.length})...');
       
       final validTopServers = topServers.where((config) => configServers.contains(config)).toList();
       final List<ServerInfo> workingTopServers = [];
       
-      // Test in batches of 3
       for (int i = 0; i < validTopServers.length; i += 3) {
         final batch = validTopServers.skip(i).take(3).toList();
         debugPrint('🔵 Testing batch of ${batch.length} top servers...');
         
         final futures = batch.map((config) => _testServerWithPing(config).timeout(
           const Duration(seconds: 5),
-          onTimeout: () => null,
+          onTimeout: () {
+            debugPrint('⏱️ Top server test timeout');
+            return null;
+          },
         )).toList();
         
         final results = await Future.wait(futures);
         
+        // Add ALL working servers from this batch
         for (var result in results) {
           if (result != null) {
             workingTopServers.add(result);
             debugPrint('✅ Top server working: ${result.name} (${result.ping}ms)');
-            
-            // Connect to first working top server immediately
-            if (connectImmediately && !isConnected) {
-              isScanning = false;
-              fastestServers = [result];
-              serversStreamController.add(List.from(fastestServers));
-              
-              await connect(vlessUri: result.config, ping: result.ping);
-              
-              debugPrint('🔵 Connected to top server, will scan for more servers in 11 seconds...');
-              return {
-                'success': true,
-                'server': result.config,
-                'ping': result.ping
-              };
-            }
           }
+        }
+        
+        // If we found at least one working server and want to connect
+        if (workingTopServers.isNotEmpty && connectImmediately && !isConnected) {
+          isScanning = false;
+          fastestServers = workingTopServers;
+          fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+          serversStreamController.add(List.from(fastestServers));
+          
+          await connect(vlessUri: fastestServers.first.config, ping: fastestServers.first.ping);
+          
+          debugPrint('🔵 Connected to top server, will scan for more in 11 seconds...');
+          return {
+            'success': true,
+            'server': fastestServers.first.config,
+            'ping': fastestServers.first.ping
+          };
         }
       }
       
-      // Update top servers list - remove dead ones
+      // Update saved top servers
       topServers = workingTopServers.map((s) => s.config).toList();
       await _updateTopServers(topServers);
       fastestServers = workingTopServers;
@@ -423,53 +428,52 @@ class VPNService {
       }
     }
 
-    // Step 2: No working top servers, scan new servers (3 by 3)
+    // Step 2: Scan new servers (3 by 3)
     debugPrint('🔵 Scanning for new servers (3 by 3)...');
     
     final prioritized = _prioritizeServers();
     final List<ServerInfo> workingServers = [];
 
-    // Test 3 at a time until we find a working one
     for (int i = 0; i < min(30, prioritized.length); i += 3) {
       final batch = prioritized.skip(i).take(3).toList();
       debugPrint('🔵 Testing batch ${(i ~/ 3) + 1}: 3 servers in parallel...');
 
       final futures = batch.map((config) => _testServerWithPing(config).timeout(
         const Duration(seconds: 5),
-        onTimeout: () => null,
+        onTimeout: () {
+          debugPrint('⏱️ Server test timeout');
+          return null;
+        },
       )).toList();
 
       final results = await Future.wait(futures);
 
+      // Add ALL working servers from this batch
       for (var result in results) {
         if (result != null) {
           workingServers.add(result);
-          scannedServers.add(result.config); // Mark as scanned
+          scannedServers.add(result.config);
           debugPrint('✅ Found working server: ${result.name} (${result.ping}ms)');
-
-          // Connect to first working server immediately
-          if (connectImmediately && !isConnected) {
-            isScanning = false;
-            fastestServers = [result];
-            serversStreamController.add(List.from(fastestServers));
-            
-            await connect(vlessUri: result.config, ping: result.ping);
-            await _updateTopServers([result.config]);
-            unawaited(_saveScannedServers());
-            
-            debugPrint('🔵 Connected, will scan for more servers in 11 seconds...');
-            return {
-              'success': true,
-              'server': result.config,
-              'ping': result.ping
-            };
-          }
         }
       }
 
-      // If we found any working servers but not connecting immediately
-      if (workingServers.isNotEmpty && !connectImmediately) {
-        break;
+      // Connect to first working server if we found any
+      if (workingServers.isNotEmpty && connectImmediately && !isConnected) {
+        isScanning = false;
+        fastestServers = workingServers;
+        fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+        serversStreamController.add(List.from(fastestServers));
+        
+        await connect(vlessUri: fastestServers.first.config, ping: fastestServers.first.ping);
+        await _updateTopServers(fastestServers.map((s) => s.config).toList());
+        unawaited(_saveScannedServers());
+        
+        debugPrint('🔵 Connected, will scan for more servers in 11 seconds...');
+        return {
+          'success': true,
+          'server': fastestServers.first.config,
+          'ping': fastestServers.first.ping
+        };
       }
     }
 
@@ -496,7 +500,6 @@ class VPNService {
     return {'success': false, 'error': 'No working servers found'};
   }
 
-  // Background scan - ONE BY ONE until 11 servers
   static Future<void> _backgroundScan() async {
     if (_isBackgroundScanning) {
       debugPrint('⚠️ Background scan already running, skipping');
@@ -509,24 +512,27 @@ class VPNService {
     final prioritized = _prioritizeServers();
     const maxServers = 11;
     
-    // Skip servers already in the list
     final testedConfigs = fastestServers.map((s) => s.config).toSet();
     final serversToTest = prioritized.where((config) => !testedConfigs.contains(config)).toList();
     
     debugPrint('🔵 Servers to test: ${serversToTest.length}');
     
-    // Test ONE BY ONE
     int tested = 0;
+    int foundCount = 0;
+    
     for (var config in serversToTest) {
       if (fastestServers.length >= maxServers) {
         debugPrint('✅ Reached max servers (11), stopping scan');
         break;
       }
       
-      tested++;
-      if (tested % 10 == 0) {
-        debugPrint('🔵 Background scan progress: tested $tested servers...');
+      // Stop if user disconnected
+      if (!isConnected) {
+        debugPrint('⚠️ User disconnected, stopping background scan');
+        break;
       }
+      
+      tested++;
       
       final result = await _testServerWithPing(config).timeout(
         const Duration(seconds: 5),
@@ -536,20 +542,22 @@ class VPNService {
       if (result != null) {
         scannedServers.add(result.config);
         fastestServers.add(result);
+        foundCount++;
         debugPrint('✅ Added server: ${result.name} (${result.ping}ms) - Total: ${fastestServers.length}/11');
         
-        // Sort by ping
         fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
         serversStreamController.add(List.from(fastestServers));
         
-        // Save progress every 3 servers
         if (fastestServers.length % 3 == 0) {
           await _updateTopServers(fastestServers.map((s) => s.config).toList());
           unawaited(_saveScannedServers());
         }
       }
       
-      // Small delay between tests
+      if (tested % 10 == 0) {
+        debugPrint('🔵 Background scan progress: tested $tested servers, found $foundCount...');
+      }
+      
       await Future.delayed(const Duration(milliseconds: 200));
     }
 
@@ -559,7 +567,7 @@ class VPNService {
     }
 
     _isBackgroundScanning = false;
-    debugPrint('✅ Background scan complete: ${fastestServers.length} servers in list');
+    debugPrint('✅ Background scan complete: ${fastestServers.length} servers in list (tested $tested, found $foundCount)');
   }
 
   static List<String> _prioritizeServers() {
@@ -608,7 +616,6 @@ class VPNService {
       final parser = V2ray.parseFromURL(uri);
       final config = parser.getFullConfiguration();
 
-      // Always test for real-time ping
       final delay = await v2ray.getServerDelay(config: config);
 
       if (delay != -1 && delay < 5000) {
@@ -668,9 +675,12 @@ class VPNService {
 
     try {
       if (isConnected) {
+        _isManualDisconnect = true; // Mark as manual before disconnecting
         await disconnect();
         await Future.delayed(const Duration(milliseconds: 500));
       }
+
+      _isManualDisconnect = false; // Reset for new connection
 
       final parser = V2ray.parseFromURL(vlessUri);
       final config = parser.getFullConfiguration();
@@ -752,6 +762,8 @@ class VPNService {
 
   static Future<void> disconnect() async {
     try {
+      _isManualDisconnect = true; // Mark as manual disconnect
+      
       if (isConnected && (sessionDownload > 0 || sessionUpload > 0)) {
         final today = DateTime.now();
         final todayStats = dailyStats.firstWhere(
