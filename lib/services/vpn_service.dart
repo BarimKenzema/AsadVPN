@@ -207,13 +207,21 @@ class VPNService {
           .where((l) => l.isNotEmpty && !l.startsWith('#'))
           .toList();
 
+      // FIXED: Include ALL protocol types, not just one
       final vless = lines.where((l) => l.toLowerCase().startsWith('vless://')).toList();
       final vmess = lines.where((l) => l.toLowerCase().startsWith('vmess://')).toList();
       final trojan = lines.where((l) => l.toLowerCase().startsWith('trojan://')).toList();
+      final ss = lines.where((l) => l.toLowerCase().startsWith('ss://')).toList();
 
-      configServers = vless.isNotEmpty
-          ? vless
-          : (vmess.isNotEmpty ? vmess : (trojan.isNotEmpty ? trojan : lines));
+      debugPrint('🔵 Found: ${vless.length} VLESS, ${vmess.length} VMESS, ${trojan.length} Trojan, ${ss.length} SS');
+
+      // Include ALL protocols, not just one type
+      configServers = [...vless, ...vmess, ...trojan, ...ss];
+
+      // If no supported protocols found, use all lines
+      if (configServers.isEmpty) {
+        configServers = lines;
+      }
 
       isSubscriptionValid = configServers.isNotEmpty;
       return isSubscriptionValid;
@@ -251,6 +259,7 @@ class VPNService {
 
     isScanning = true;
     scanProgress = 0;
+    fastestServers.clear(); // Clear old results
     
     // Prioritize: top servers > cached servers > new servers
     final prioritized = _prioritizeServers();
@@ -274,7 +283,7 @@ class VPNService {
       if (result != null) {
         fastestServers.add(result);
         fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
-        serversStreamController.add(fastestServers);
+        serversStreamController.add(List.from(fastestServers)); // Send copy
       }
     }
 
@@ -282,7 +291,7 @@ class VPNService {
       ..sort((a, b) => a.ping.compareTo(b.ping));
 
     fastestServers = working;
-    serversStreamController.add(fastestServers);
+    serversStreamController.add(List.from(fastestServers)); // Send copy
     isScanning = false;
 
     if (working.isNotEmpty) {
@@ -405,6 +414,7 @@ class VPNService {
     if (uri.startsWith('vless://')) return 'VLESS';
     if (uri.startsWith('vmess://')) return 'VMESS';
     if (uri.startsWith('trojan://')) return 'TROJAN';
+    if (uri.startsWith('ss://')) return 'SS';
     return 'UNKNOWN';
   }
 
