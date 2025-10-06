@@ -67,6 +67,7 @@ class VPNService {
   static bool _isBackgroundScanning = false;
   static DateTime? _lastConnectionTime;
   static bool _isManualDisconnect = false;
+  static bool _cancelScan = false;
 
   static final StreamController<List<ServerInfo>> serversStreamController =
       StreamController<List<ServerInfo>>.broadcast();
@@ -146,6 +147,13 @@ class VPNService {
     } catch (e) {
       debugPrint('❌ Internet check failed: $e');
       return false;
+    }
+  }
+
+  static void cancelScan() {
+    if (isScanning) {
+      _cancelScan = true;
+      debugPrint('🛑 Scan cancellation requested');
     }
   }
 
@@ -388,8 +396,7 @@ class VPNService {
       } on NetworkException catch (e) {
         // Network error - KEEP the subscription
         debugPrint('⚠️ Cannot validate subscription (${e.message}), but keeping it saved');
-        // Keep currentSubscriptionLink and prefs as-is
-        return false; // Return false but don't delete
+        return false;
       }
     } catch (e) {
       debugPrint('❌ Save subscription error: $e');
@@ -419,118 +426,55 @@ class VPNService {
     }
 
     isScanning = true;
+    _cancelScan = false;
     scanProgress = 0;
     _lastConnectionTime = null;
     
     totalToScan = 0;
     scanProgressController.add(0);
 
-    // Step 1: Test saved top servers first (3 by 3)
+    // Step 1: Test saved top servers first (ONE BY ONE, collecting up to 3)
     if (topServers.isNotEmpty) {
       debugPrint('🔵 Testing saved top servers (${topServers.length})...');
       
       final validTopServers = topServers.where((config) => configServers.contains(config)).toList();
       final List<ServerInfo> workingTopServers = [];
       
-      for (int i = 0; i < validTopServers.length; i += 3) {
-        final batch = validTopServers.skip(i).take(3).toList();
-        debugPrint('🔵 Testing batch of ${batch.length} top servers...');
+      // Test ONE BY ONE until we get 3 working servers or test all
+      for (int i = 0; i < validTopServers.length && workingTopServers.length < 3 && !_cancelScan; i++) {
+        debugPrint('🔵 Testing top server ${i + 1}/${validTopServers.length}...');
         
-        final futures = batch.map((config) => _testServerWithPing(config).timeout(
-          const Duration(seconds: 5),
+        final result = await _testServerWithPing(validTopServers[i]).timeout(
+          const Duration(seconds: 3),
           onTimeout: () {
             debugPrint('⏱️ Top server test timeout');
             return null;
           },
-        )).toList();
+        );
         
-        final results = await Future.wait(futures);
-        
-        // Add ALL working servers from this batch
-        for (var result in results) {
-          if (result != null) {
-            workingTopServers.add(result);
-            debugPrint('✅ Top server working: ${result.name} (${result.ping}ms)');
-          }
-        }
-        
-        // If we found at least one working server and want to connect
-        if (workingTopServers.isNotEmpty && connectImmediately && !isConnected) {
-          isScanning = false;
-          fastestServers = workingTopServers;
-          fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
-          serversStreamController.add(List.from(fastestServers));
-          
-          await connect(vlessUri: fastestServers.first.config, ping: fastestServers.first.ping);
-          
-          debugPrint('🔵 Connected to top server, will scan for more in 11 seconds...');
-          return {
-            'success': true,
-            'server': fastestServers.first.config,
-            'ping': fastestServers.first.ping
-          };
+        if (result != null) {
+          workingTopServers.add(result);
+          debugPrint('✅ Top server working: ${result.name} (${result.ping}ms) - Found ${workingTopServers.length}/3');
         }
       }
       
-      // Update saved top servers
-      topServers = workingTopServers.map((s) => s.config).toList();
-      await _updateTopServers(topServers);
-      fastestServers = workingTopServers;
-      fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
-      serversStreamController.add(List.from(fastestServers));
+      if (_cancelScan) {
+        isScanning = false;
+        _cancelScan = false;
+        return {'success': false, 'error': 'Scan cancelled'};
+      }
       
+      // If we found any working servers, connect to the fastest
       if (workingTopServers.isNotEmpty && connectImmediately) {
         isScanning = false;
-        await connect(vlessUri: workingTopServers.first.config, ping: workingTopServers.first.ping);
-        return {
-          'success': true,
-          'server': workingTopServers.first.config,
-          'ping': workingTopServers.first.ping
-        };
-      }
-    }
-
-    // Step 2: Scan new servers (3 by 3)
-    debugPrint('🔵 Scanning for new servers (3 by 3)...');
-    
-    final prioritized = _prioritizeServers();
-    final List<ServerInfo> workingServers = [];
-
-    for (int i = 0; i < min(30, prioritized.length); i += 3) {
-      final batch = prioritized.skip(i).take(3).toList();
-      debugPrint('🔵 Testing batch ${(i ~/ 3) + 1}: 3 servers in parallel...');
-
-      final futures = batch.map((config) => _testServerWithPing(config).timeout(
-        const Duration(seconds: 5),
-        onTimeout: () {
-          debugPrint('⏱️ Server test timeout');
-          return null;
-        },
-      )).toList();
-
-      final results = await Future.wait(futures);
-
-      // Add ALL working servers from this batch
-      for (var result in results) {
-        if (result != null) {
-          workingServers.add(result);
-          scannedServers.add(result.config);
-          debugPrint('✅ Found working server: ${result.name} (${result.ping}ms)');
-        }
-      }
-
-      // Connect to first working server if we found any
-      if (workingServers.isNotEmpty && connectImmediately && !isConnected) {
-        isScanning = false;
-        fastestServers = workingServers;
+        fastestServers = workingTopServers;
         fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
         serversStreamController.add(List.from(fastestServers));
         
         await connect(vlessUri: fastestServers.first.config, ping: fastestServers.first.ping);
         await _updateTopServers(fastestServers.map((s) => s.config).toList());
-        unawaited(_saveScannedServers());
         
-        debugPrint('🔵 Connected, will scan for more servers in 11 seconds...');
+        debugPrint('🔵 Connected to top server (${workingTopServers.length} servers found), will scan for more in 11 seconds...');
         return {
           'success': true,
           'server': fastestServers.first.config,
@@ -539,8 +483,42 @@ class VPNService {
       }
     }
 
+    // Step 2: Scan new servers (ONE BY ONE, collecting up to 3)
+    debugPrint('🔵 Scanning for new servers (one by one until 3 found)...');
+    
+    final prioritized = _prioritizeServers();
+    final List<ServerInfo> workingServers = [];
+    
+    // Test ONE BY ONE until we get 3 working servers or test 30 servers
+    int tested = 0;
+    for (var config in prioritized) {
+      if (workingServers.length >= 3 || tested >= 30 || _cancelScan) {
+        break;
+      }
+      
+      tested++;
+      debugPrint('🔵 Testing server $tested/30...');
+      
+      final result = await _testServerWithPing(config).timeout(
+        const Duration(seconds: 3),
+        onTimeout: () {
+          debugPrint('⏱️ Server test timeout');
+          return null;
+        },
+      );
+
+      if (result != null) {
+        workingServers.add(result);
+        debugPrint('✅ Found working server: ${result.name} (${result.ping}ms) - Found ${workingServers.length}/3');
+      }
+    }
+
     isScanning = false;
-    unawaited(_saveScannedServers());
+
+    if (_cancelScan) {
+      _cancelScan = false;
+      return {'success': false, 'error': 'Scan cancelled'};
+    }
 
     if (workingServers.isNotEmpty) {
       fastestServers = workingServers;
@@ -550,6 +528,13 @@ class VPNService {
       
       if (connectImmediately) {
         await connect(vlessUri: workingServers.first.config, ping: workingServers.first.ping);
+        
+        debugPrint('🔵 Connected (${workingServers.length} servers found), will scan for more in 11 seconds...');
+        return {
+          'success': true,
+          'server': workingServers.first.config,
+          'ping': workingServers.first.ping
+        };
       }
       
       return {
@@ -597,12 +582,16 @@ class VPNService {
       tested++;
       
       final result = await _testServerWithPing(config).timeout(
-        const Duration(seconds: 5),
+        const Duration(seconds: 3),
         onTimeout: () => null,
       );
       
       if (result != null) {
-        scannedServers.add(result.config);
+        // Don't mark top servers as "scanned" permanently
+        if (fastestServers.length < 11) {
+          scannedServers.add(result.config);
+        }
+        
         fastestServers.add(result);
         foundCount++;
         debugPrint('✅ Added server: ${result.name} (${result.ping}ms) - Total: ${fastestServers.length}/11');
@@ -610,8 +599,12 @@ class VPNService {
         fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
         serversStreamController.add(List.from(fastestServers));
         
-        if (fastestServers.length % 3 == 0) {
+        if (fastestServers.length % 3 == 0 || fastestServers.length == 11) {
           await _updateTopServers(fastestServers.map((s) => s.config).toList());
+          
+          // Only save non-top servers to scannedServers
+          final topConfigs = topServers.toSet();
+          scannedServers.removeWhere((config) => topConfigs.contains(config));
           unawaited(_saveScannedServers());
         }
       }
@@ -625,6 +618,10 @@ class VPNService {
 
     if (fastestServers.isNotEmpty) {
       await _updateTopServers(fastestServers.map((s) => s.config).toList());
+      
+      // Clean scanned servers list - remove top servers
+      final topConfigs = topServers.toSet();
+      scannedServers.removeWhere((config) => topConfigs.contains(config));
       unawaited(_saveScannedServers());
     }
 
@@ -636,7 +633,7 @@ class VPNService {
     final Set<String> processed = {};
     final List<String> result = [];
 
-    // 1. Top servers first
+    // 1. Top servers first (always re-test these)
     for (var config in topServers) {
       if (configServers.contains(config) && !processed.contains(config)) {
         result.add(config);
@@ -644,11 +641,12 @@ class VPNService {
       }
     }
 
-    // 2. Cached servers with good success rate (skip already scanned)
+    // 2. Cached servers with good success rate
     final goodCached = serverCache.entries
         .where((e) => 
             e.value.successRate > 0.7 && 
             configServers.contains(e.key) &&
+            !topServers.contains(e.key) &&
             !scannedServers.contains(e.key))
         .map((e) => e.key)
         .where((c) => !processed.contains(c))
@@ -656,9 +654,12 @@ class VPNService {
     result.addAll(goodCached);
     processed.addAll(goodCached);
 
-    // 3. Rest of servers (skip already scanned, then shuffle)
+    // 3. Rest of servers
     final remaining = configServers
-        .where((c) => !processed.contains(c) && !scannedServers.contains(c))
+        .where((c) => 
+            !processed.contains(c) && 
+            !topServers.contains(c) &&
+            !scannedServers.contains(c))
         .toList()
       ..shuffle(Random());
     result.addAll(remaining);
@@ -678,7 +679,15 @@ class VPNService {
       final parser = V2ray.parseFromURL(uri);
       final config = parser.getFullConfiguration();
 
-      final delay = await v2ray.getServerDelay(config: config);
+      // Add internal timeout to the actual delay check
+      final delay = await v2ray.getServerDelay(config: config)
+          .timeout(
+            const Duration(seconds: 3),
+            onTimeout: () {
+              debugPrint('⏱️ Internal delay check timeout for ${parser.remark}');
+              return -1;
+            },
+          );
 
       if (delay != -1 && delay < 5000) {
         debugPrint('✅ ${parser.remark}: ${delay}ms');
@@ -720,6 +729,7 @@ class VPNService {
       }
       return null;
     } catch (e) {
+      debugPrint('❌ Test error: $e');
       return null;
     }
   }

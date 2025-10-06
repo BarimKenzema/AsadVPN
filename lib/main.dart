@@ -151,8 +151,6 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
     await VPNService.init();
     if (!mounted) return;
     
-    // Don't check subscription validity here
-    // Only show dialog if there's NO subscription link at all
     if (VPNService.currentSubscriptionLink == null || VPNService.currentSubscriptionLink!.isEmpty) {
       _showSubscriptionDialog();
     } else {
@@ -168,7 +166,6 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
       return;
     }
     
-    // Check if subscription link exists before attempting connection
     if (VPNService.currentSubscriptionLink == null || VPNService.currentSubscriptionLink!.isEmpty) {
       _showSubscriptionDialog();
       return;
@@ -186,7 +183,6 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
     if (result['success'] != true) {
       final error = result['error'] ?? 'Unknown error';
       
-      // Handle different error types
       if (error.contains('No internet connection')) {
         setState(() {
           status = 'No internet connection';
@@ -210,6 +206,10 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
           status = l10n?.invalidSubscription ?? 'Invalid subscription';
         });
         _showSubscriptionDialog();
+      } else if (error.contains('cancelled')) {
+        setState(() {
+          status = 'Scan cancelled';
+        });
       } else {
         setState(() {
           status = l10n?.noServers ?? 'No servers available';
@@ -264,7 +264,6 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
           TextButton(
             onPressed: () async {
               if (controller.text.isNotEmpty) {
-                // Show loading
                 showDialog(
                   context: ctx,
                   barrierDismissible: false,
@@ -273,11 +272,9 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                 
                 final ok = await VPNService.saveSubscriptionLink(controller.text);
                 
-                // Close loading dialog
                 Navigator.pop(ctx);
                 
                 if (ok) {
-                  // Close subscription dialog
                   Navigator.pop(ctx);
                   _updateConnectionStatus();
                   
@@ -288,12 +285,10 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                     ));
                   }
                 } else {
-                  // Check if it's a network error or invalid subscription
                   if (mounted) {
                     final hasInternet = await VPNService.hasInternetConnection();
                     if (!hasInternet) {
-                      // Network error - keep subscription, show warning
-                      Navigator.pop(ctx); // Close dialog
+                      Navigator.pop(ctx);
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(
                           content: Row(
@@ -310,7 +305,6 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                         ),
                       );
                     } else {
-                      // Invalid subscription
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(
                           content: Text(AppLocalizations.of(context)?.invalidSubscription ?? 'Invalid subscription'),
@@ -458,14 +452,14 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                 
                 // Status text
                 Text(
-                  isConnecting ? (VPNService.isScanning ? scanStatus : (l10n?.connecting ?? 'Connecting...')) : status,
+                  isConnecting ? (VPNService.isScanning ? 'Finding servers...' : (l10n?.connecting ?? 'Connecting...')) : status,
                   style: TextStyle(
                     fontSize: 18,
                     color: isDark ? Colors.white70 : Colors.black87,
                   ),
                 ),
                 
-                // Progress indicator
+                // Progress indicator with CANCEL button
                 if (isConnecting || VPNService.isScanning)
                   Padding(
                     padding: const EdgeInsets.only(top: 20),
@@ -474,18 +468,25 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                         const CircularProgressIndicator(
                           valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
                         ),
-                        if (VPNService.isScanning && VPNService.totalToScan > 0)
-                          Padding(
-                            padding: const EdgeInsets.only(top: 12),
-                            child: SizedBox(
-                              width: 200,
-                              child: LinearProgressIndicator(
-                                value: VPNService.scanProgress / VPNService.totalToScan,
-                                backgroundColor: Colors.grey[300],
-                                valueColor: const AlwaysStoppedAnimation<Color>(Colors.blue),
-                              ),
-                            ),
+                        const SizedBox(height: 16),
+                        // CANCEL BUTTON
+                        TextButton.icon(
+                          onPressed: () {
+                            VPNService.cancelScan();
+                            setState(() {
+                              isConnecting = false;
+                              status = 'Scan cancelled';
+                            });
+                          },
+                          icon: const Icon(Icons.cancel, color: Colors.red),
+                          label: const Text(
+                            'Cancel',
+                            style: TextStyle(color: Colors.red, fontSize: 16),
                           ),
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -634,7 +635,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                       ? Center(
                           child: Text(
                             VPNService.isScanning
-                                ? scanStatus
+                                ? 'Finding servers...'
                                 : (l10n?.noServers ?? 'Tap Connect to scan servers'),
                             style: const TextStyle(color: Colors.grey, fontSize: 14),
                           ),
