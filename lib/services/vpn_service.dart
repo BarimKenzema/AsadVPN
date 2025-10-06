@@ -53,6 +53,7 @@ class VPNService {
   // Background scanning
   static Timer? _backgroundScanTimer;
   static Timer? _healthCheckTimer;
+  static bool _isBackgroundScanning = false;
 
   static final StreamController<List<ServerInfo>> serversStreamController =
       StreamController<List<ServerInfo>>.broadcast();
@@ -145,7 +146,7 @@ class VPNService {
     _backgroundScanTimer = Timer.periodic(const Duration(minutes: 16), (timer) {
       if (!isScanning && configServers.isNotEmpty) {
         debugPrint('🔵 Background scan triggered');
-        scanAndSelectBestServer(connectImmediately: false);
+        _backgroundScan();
       }
     });
   }
@@ -322,51 +323,48 @@ class VPNService {
     }
     
     final prioritized = _prioritizeServers();
-    final batch = prioritized.take(min(50, prioritized.length)).toList();
     
-    totalToScan = batch.length;
+    totalToScan = 0; // Hide progress counter
     scanProgressController.add(0);
 
     bool hasConnected = false;
     final List<ServerInfo> workingServers = [];
 
-    // Process in batches of 5 parallel tests
-    const batchSize = 5;
-    for (int i = 0; i < batch.length; i += batchSize) {
-      final end = min(i + batchSize, batch.length);
-      final chunk = batch.sublist(i, end);
-
-      // Test 5 servers in parallel
-      final futures = chunk.map((config) => _testServerWithPing(config).timeout(
+    // Phase 1: Test ONE BY ONE until first connection
+    debugPrint('🔵 Phase 1: Testing servers one by one until connection...');
+    for (int i = 0; i < min(20, prioritized.length); i++) {
+      final result = await _testServerWithPing(prioritized[i]).timeout(
         const Duration(seconds: 5),
         onTimeout: () => null,
-      )).toList();
+      );
 
-      final results = await Future.wait(futures);
+      if (result != null) {
+        workingServers.add(result);
+        fastestServers.add(result);
+        fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+        serversStreamController.add(List.from(fastestServers));
 
-      for (var result in results) {
-        if (result != null) {
-          workingServers.add(result);
-          fastestServers.add(result);
-          fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
-          serversStreamController.add(List.from(fastestServers));
-
-          // Connect to first good server immediately
-          if (connectImmediately && !hasConnected && !isConnected) {
-            hasConnected = true;
-            debugPrint('✅ Found first good server, connecting...');
-            unawaited(connect(vlessUri: result.config, ping: result.ping));
-          }
+        // Connect to first good server immediately
+        if (connectImmediately && !hasConnected && !isConnected) {
+          hasConnected = true;
+          debugPrint('✅ Found first good server, connecting...');
+          isScanning = false; // Stop showing "scanning" indicator
+          unawaited(connect(vlessUri: result.config, ping: result.ping));
+          
+          // Start background scan to find more servers
+          unawaited(_backgroundScan());
+          
+          await _updateTopServers([result.config]);
+          
+          return {
+            'success': true,
+            'server': result.config,
+            'ping': result.ping
+          };
         }
       }
-
-      scanProgress = end;
-      scanProgressController.add(scanProgress);
     }
 
-    workingServers.sort((a, b) => a.ping.compareTo(b.ping));
-    fastestServers = workingServers;
-    serversStreamController.add(List.from(fastestServers));
     isScanning = false;
 
     if (workingServers.isNotEmpty) {
@@ -380,6 +378,55 @@ class VPNService {
     }
 
     return {'success': false, 'error': 'No working servers'};
+  }
+
+  // Background scan to fill up to 11 servers
+  static Future<void> _backgroundScan() async {
+    if (_isBackgroundScanning) return;
+    
+    _isBackgroundScanning = true;
+    debugPrint('🔵 Background scan: Filling server list to 11...');
+
+    final prioritized = _prioritizeServers();
+    final maxServers = 11;
+    
+    // Process in batches of 4
+    const batchSize = 4;
+    for (int i = 0; i < prioritized.length && fastestServers.length < maxServers; i += batchSize) {
+      if (fastestServers.length >= maxServers) break;
+      
+      final end = min(i + batchSize, prioritized.length);
+      final chunk = prioritized.sublist(i, end);
+
+      // Test 4 servers in parallel
+      final futures = chunk.map((config) => _testServerWithPing(config).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () => null,
+      )).toList();
+
+      final results = await Future.wait(futures);
+
+      for (var result in results) {
+        if (result != null && fastestServers.length < maxServers) {
+          // Avoid duplicates
+          if (!fastestServers.any((s) => s.config == result.config)) {
+            fastestServers.add(result);
+            fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+            serversStreamController.add(List.from(fastestServers));
+          }
+        }
+      }
+
+      // Small delay between batches
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+
+    if (fastestServers.isNotEmpty) {
+      await _updateTopServers(fastestServers.map((s) => s.config).toList());
+    }
+
+    _isBackgroundScanning = false;
+    debugPrint('✅ Background scan complete: ${fastestServers.length} servers found');
   }
 
   static List<String> _prioritizeServers() {
@@ -412,7 +459,7 @@ class VPNService {
   }
 
   static Future<void> _updateTopServers(List<String> servers) async {
-    topServers = servers.take(5).toList();
+    topServers = servers.take(11).toList();
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList('top_servers', topServers);
   }
