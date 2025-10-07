@@ -1170,7 +1170,7 @@ class VPNService {
     _cachedAsnFingerprint = fp;
     _asnCachedAt = DateTime.now();
     return fp;
-    }
+  }
 
   static String _ipPrefix(String ip) {
     if (ip.contains('.')) {
@@ -1226,25 +1226,6 @@ class VPNService {
         }
       }
     });
-  }
-
-  // ========================= CONNECT / DISCONNECT (stats helpers) =========================
-  static Future<void> _saveStats() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final encoded = jsonEncode(dailyStats.map((e) => e.toJson()).toList());
-      await prefs.setString('daily_stats', encoded);
-    } catch (e) {
-      debugPrint('❌ Stats save error: $e');
-    }
-  }
-
-  static void dispose() {
-    _healthCheckTimer?.cancel();
-    serversStreamController.close();
-    connectionStateController.close();
-    statusStreamController.close();
-    scanProgressController.close();
   }
 }
 
