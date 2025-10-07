@@ -148,17 +148,16 @@ class VPNService {
     }
   }
 
-  static void _handleDisconnect() {
+  static void _handleDisconnect() async {
     debugPrint('⚠️ Unexpected disconnect, attempting reconnect...');
     _lastConnectionTime = null;
-    Future.delayed(const Duration(seconds: 2), () async {
-      if (!isConnected && fastestServers.isNotEmpty && !_isManualDisconnect) {
-        await connect(
-          vlessUri: fastestServers.first.config,
-          ping: fastestServers.first.ping,
-        );
-      }
-    });
+    await Future.delayed(const Duration(seconds: 2));
+    if (!isConnected && fastestServers.isNotEmpty && !_isManualDisconnect) {
+      await connect(
+        vlessUri: fastestServers.first.config,
+        ping: fastestServers.first.ping,
+      );
+    }
   }
 
   // ========================= NET / CONTROL =========================
@@ -188,9 +187,8 @@ class VPNService {
     }
   }
 
-  // Public: called by main.dart (already used)
+  // Public: called by main.dart
   static void resumeAutoScan() {
-    // Safely resume profile fill while app is in foreground (no OS service).
     unawaited(refreshNetworkProfile());
     unawaited(_autoFillCurrentProfile(limitVerify: 4));
   }
@@ -207,7 +205,6 @@ class VPNService {
       currentNetworkKey = key;
       await _switchToProfile(key);
     } else {
-      // Even if same, ensure display reflects persisted profile in case we resumed
       await _switchToProfile(key);
     }
   }
@@ -232,7 +229,6 @@ class VPNService {
       lastGoodServer = prefs.getString('last_good_server');
       _lastScannedIndex = prefs.getInt('last_scanned_index') ?? 0;
 
-      // Compute and switch to current profile
       await refreshNetworkProfile();
 
       debugPrint('🔵 Init complete. Subscription link exists: ${currentSubscriptionLink != null}');
@@ -246,15 +242,13 @@ class VPNService {
   // ========================= PROFILE SWITCH & FILL =========================
   static Future<void> _switchToProfile(String key) async {
     profiles.putIfAbsent(key, () => Profile(updated: DateTime.now()));
-    // Update UI display from profile.top (fallback to global seeds if empty)
     final p = profiles[key]!;
+
     List<String> toShow = List.from(p.top);
     if (toShow.isEmpty) {
-      // Seed from knownGoodGlobal without modifying donor profile
       final seed = knownGoodGlobal.where((c) => !toShow.contains(c)).take(11).toList();
       toShow = seed;
     }
-    // Build fastestServers from cache for UI
     fastestServers = toShow.map((cfg) {
       final cached = serverCache[cfg];
       if (cached != null) {
@@ -277,17 +271,13 @@ class VPNService {
       }
     }).toList();
     serversStreamController.add(List.from(fastestServers));
-
-    // Persist topServers (for UI preload compatibility)
     await _saveTopServersForUi(p.top);
 
-    // If still low, fill a few silently (no OS background)
     if ((p.top.length) < 11) {
       unawaited(_autoFillCurrentProfile(limitVerify: 4));
     }
   }
 
-  // Fill current profile by verifying a few candidates (fast TCP prefilter + 2s verify)
   static Future<void> _autoFillCurrentProfile({int limitVerify = 4}) async {
     if (_isBackgroundScanning || isConnected) return;
     if (currentNetworkKey == null) return;
@@ -296,23 +286,19 @@ class VPNService {
     _cancelAutoScan = false;
 
     try {
-      // Ensure subscription loaded
       if (configServers.isEmpty && (currentSubscriptionLink != null)) {
         final ok = await validateSubscription();
         if (!ok) return;
       }
       final p = profiles[currentNetworkKey] ?? Profile();
 
-      // Candidates: from knownGoodGlobal first, then from configServers prioritized (newest + shuffle)
       final Set<String> have = p.top.toSet();
       final List<String> candidates = [];
 
-      // prefer global seeds not in top
       for (final c in knownGoodGlobal) {
         if (have.length + candidates.length >= 11) break;
         if (!have.contains(c)) candidates.add(c);
       }
-      // then new prioritized configs
       if (candidates.length < 11) {
         final pri = _prioritizeServers();
         for (final c in pri) {
@@ -320,27 +306,22 @@ class VPNService {
           if (!have.contains(c) && !candidates.contains(c)) candidates.add(c);
         }
       }
-
       if (candidates.isEmpty) return;
 
-      // Stage A: TCP prefilter for candidates
       final tcpOk = await _tcpPrefilterConfigs(
         candidates,
         timeout: tcpFastTimeout,
         concurrency: tcpFastConcurrency,
-        stopOnCount: limitVerify * 3, // oversample a bit
+        stopOnCount: limitVerify * 3,
       );
 
-      // Stage B: verify a few
       int verified = 0;
       for (final c in tcpOk) {
         if (verified >= limitVerify || isConnected || _cancelAutoScan) break;
         final si = await _testServerWithPing(c, timeout: bgVerifyTimeout);
         if (si != null) {
           verified++;
-          // Update profile: add to top (front), cap 11
           _commitSuccessToCurrentProfile(si.config);
-          // Update UI display
           final cached = serverCache[si.config];
           final toAdd = ServerInfo(
             config: si.config,
@@ -350,14 +331,13 @@ class VPNService {
             successRate: cached?.successRate ?? 0.0,
             lastConnected: cached?.lastConnected,
           );
-          // Avoid duplicates in fastestServers
           fastestServers.removeWhere((s) => s.config == si.config);
           fastestServers.add(toAdd);
           fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
           serversStreamController.add(List.from(fastestServers));
         }
       }
-      await _savePersistent(); // persist profiles + globals
+      await _savePersistent();
     } catch (e) {
       debugPrint('❌ Auto-fill error: $e');
     } finally {
@@ -440,18 +420,15 @@ class VPNService {
   static Future<void> _loadPersistent() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      // Profiles map
       final pjson = prefs.getString('profiles_json');
       if (pjson != null) {
         final decoded = jsonDecode(pjson) as Map<String, dynamic>;
         profiles = decoded.map((k, v) => MapEntry(k, Profile.fromJson(v)));
       }
-      // Global known-good
       knownGoodGlobal = prefs.getStringList('known_good_global') ?? [];
-      // For UI backward compatibility
       final uiTop = prefs.getStringList('top_servers') ?? [];
       if (uiTop.isNotEmpty) {
-        // Will be overridden by current profile switch anyway
+        // kept for UI preload compatibility
       }
       debugPrint(
           '✅ Loaded profiles: ${profiles.length}, global seeds: ${knownGoodGlobal.length}');
@@ -467,7 +444,6 @@ class VPNService {
           jsonEncode(profiles.map((k, v) => MapEntry(k, v.toJson())));
       await prefs.setString('profiles_json', encoded);
       await prefs.setStringList('known_good_global', knownGoodGlobal);
-      // Save current profile top list for UI preload compatibility
       await _saveTopServersForUi(profiles[currentNetworkKey]?.top ?? []);
     } catch (e) {
       debugPrint('❌ Persistent save error: $e');
@@ -478,9 +454,7 @@ class VPNService {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setStringList('top_servers', top.take(11).toList());
-    } catch (e) {
-      // ignore
-    }
+    } catch (_) {}
   }
 
   // ========================= SUBSCRIPTION =========================
@@ -558,7 +532,6 @@ class VPNService {
         } else {
           _lastScannedIndex = 0;
           await prefs.setInt('last_scanned_index', _lastScannedIndex);
-          // Switch profile now that subscription reloaded
           await refreshNetworkProfile();
         }
         debugPrint('✅ Subscription link ${valid ? "saved and validated" : "invalid"}');
@@ -594,7 +567,7 @@ class VPNService {
       if (!valid) return {'success': false, 'error': 'Invalid subscription or no servers'};
     }
 
-    await refreshNetworkProfile(); // ensure profile is current
+    await refreshNetworkProfile();
 
     isScanning = true;
     _cancelScan = false;
@@ -619,7 +592,6 @@ class VPNService {
           debugPrint('✅ Displayed server working: ${result.name} (${result.ping}ms)');
           if (connectImmediately) {
             isScanning = false;
-            // Update display and profile order
             final idx = fastestServers.indexWhere((s) => s.config == result.config);
             if (idx != -1) {
               final s = fastestServers.removeAt(idx);
@@ -649,7 +621,7 @@ class VPNService {
       }
     }
 
-    // Step 0.5: Fallback to this profile's knownGood, else global seeds
+    // Step 0.5: Fallback to this profile's knownGood, then global seeds
     final fallbacks = _fallbackKnownForCurrent();
     if (!isConnected && fallbacks.isNotEmpty) {
       debugPrint('🔵 Fallback: testing profile/global known-good (${fallbacks.length})...');
@@ -659,7 +631,6 @@ class VPNService {
             .timeout(userTestTimeout, onTimeout: () => null);
         if (result != null) {
           isScanning = false;
-          // Update UI + profile
           final cached = serverCache[cfg];
           final si = ServerInfo(
             config: cfg,
@@ -722,7 +693,6 @@ class VPNService {
     return {'success': false, 'error': 'No working servers found'};
   }
 
-  // Fallback order: current profile knownGood -> global seeds (dedup)
   static List<String> _fallbackKnownForCurrent() {
     final p = profiles[currentNetworkKey];
     final displayed = fastestServers.map((s) => s.config).toSet();
@@ -739,12 +709,11 @@ class VPNService {
   }
 
   // ========================= PRIORITY =========================
-  // top servers first; then cached good; then newest (reversed) and shuffled
   static List<String> _prioritizeServers() {
     final Set<String> processed = {};
     final List<String> result = [];
 
-    // 1) current profile's top servers (keep at front)
+    // 1) current profile's top servers first
     final p = profiles[currentNetworkKey];
     if (p != null) {
       for (final config in p.top) {
@@ -779,7 +748,6 @@ class VPNService {
   }
 
   // ========================= TESTS & HELPERS =========================
-  // Ensure DoH + IPv4 preference (helps on hostile ISPs)
   static String _ensureDnsAndIPv4(String config) {
     try {
       final Map<String, dynamic> json = jsonDecode(config);
@@ -794,11 +762,10 @@ class VPNService {
       json['routing']['domainStrategy'] = 'UseIPv4';
       return jsonEncode(json);
     } catch (_) {
-      return config; // if parsing fails, use original
+      return config;
     }
   }
 
-  // Single V2Ray delay test with customizable timeout
   static Future<ServerInfo?> _testServerWithPing(String uri, {Duration? timeout}) async {
     try {
       final parser = V2ray.parseFromURL(uri);
@@ -861,7 +828,6 @@ class VPNService {
     }
   }
 
-  // TCP PREFILTER
   static Future<List<String>> _tcpPrefilterConfigs(
     List<String> configs, {
     required Duration timeout,
@@ -1110,7 +1076,6 @@ class VPNService {
       await v2ray.stopV2Ray();
       debugPrint('✅ Disconnected');
 
-      // After disconnect, switch/refresh current profile (if network changed)
       await refreshNetworkProfile();
     } catch (e) {
       debugPrint('❌ Disconnect error: $e');
@@ -1134,7 +1099,6 @@ class VPNService {
   }
 
   // ========================= NETWORK KEY (NO LOCATION) =========================
-  // Build a privacy-friendly network key based on connectivity type + ASN/IP prefix
   static Future<String?> _deriveNetworkKey() async {
     try {
       final conn = await Connectivity().checkConnectivity();
@@ -1144,7 +1108,6 @@ class VPNService {
               ? 'wifi'
               : 'other';
 
-      // derive asn fingerprint: asn-XXXX|ippfx-A.B
       final asnFp = await _getAsnFingerprint();
       if (asnFp == null) return '$type|unknown';
       return '$type|$asnFp';
@@ -1153,7 +1116,6 @@ class VPNService {
     }
   }
 
-  // Get asn-<num>|ippfx-<A.B>, cached for TTL
   static Future<String?> _getAsnFingerprint() async {
     final now = DateTime.now();
     if (_cachedAsnFingerprint != null &&
@@ -1162,7 +1124,6 @@ class VPNService {
       return _cachedAsnFingerprint;
     }
 
-    // Try ipapi.co then ipwho.is then ipinfo.io
     String? ip;
     String? asn;
     try {
@@ -1193,8 +1154,7 @@ class VPNService {
         if (r.statusCode == 200) {
           final j = jsonDecode(r.body);
           ip = (j['ip'] ?? '').toString();
-          // org: "AS13335 Cloudflare"
-          final org = (j['org'] ?? '').toString();
+          final org = (j['org'] ?? '').toString(); // "AS13335 Cloudflare"
           if (org.startsWith('AS')) {
             final parts = org.split(' ');
             final first = parts.isNotEmpty ? parts[0] : '';
@@ -1210,10 +1170,9 @@ class VPNService {
     _cachedAsnFingerprint = fp;
     _asnCachedAt = DateTime.now();
     return fp;
-  }
+    }
 
   static String _ipPrefix(String ip) {
-    // Return first 2 octets for IPv4; for IPv6 return first hextet
     if (ip.contains('.')) {
       final parts = ip.split('.');
       if (parts.length >= 2) {
@@ -1228,29 +1187,26 @@ class VPNService {
   }
 
   // ========================= PROFILE UPDATES =========================
-  // Add success to current profile + global seeds; keep caps (top<=11, kg<=50, global<=100)
   static void _commitSuccessToCurrentProfile(String cfg) {
     if (currentNetworkKey == null) return;
     final p = profiles[currentNetworkKey] ?? Profile();
-    // top: move to front, cap 11
     p.top.remove(cfg);
     p.top.insert(0, cfg);
     if (p.top.length > 11) p.top = p.top.take(11).toList();
-    // kg: add to front, cap 50
+
     p.kg.remove(cfg);
     p.kg.insert(0, cfg);
     if (p.kg.length > 50) p.kg = p.kg.take(50).toList();
+
     p.updated = DateTime.now();
     profiles[currentNetworkKey!] = p;
 
-    // global seeds
     knownGoodGlobal.remove(cfg);
     knownGoodGlobal.insert(0, cfg);
     if (knownGoodGlobal.length > 100) {
       knownGoodGlobal = knownGoodGlobal.take(100).toList();
     }
 
-    // Persist
     unawaited(_savePersistent());
   }
 
@@ -1272,144 +1228,14 @@ class VPNService {
     });
   }
 
-  // ========================= CONNECT / DISCONNECT (unchanged logic around stats) =========================
-  static Future<bool> connect({required String vlessUri, int? ping}) async {
-    if (kIsWeb || !Platform.isAndroid) return false;
-
+  // ========================= CONNECT / DISCONNECT (stats helpers) =========================
+  static Future<void> _saveStats() async {
     try {
-      if (isConnected) {
-        _isManualDisconnect = true;
-        await disconnect();
-        await Future.delayed(const Duration(milliseconds: 500));
-      }
-
-      _isManualDisconnect = false;
-
-      final parser = V2ray.parseFromURL(vlessUri);
-      final config = parser.getFullConfiguration();
-
-      if (await v2ray.requestPermission()) {
-        await v2ray.startV2Ray(
-          remark: parser.remark,
-          config: config,
-          proxyOnly: false,
-          bypassSubnets: [],
-        );
-
-        currentConnectedConfig = vlessUri;
-        currentConnectedPing = ping;
-
-        final existing = serverCache[vlessUri];
-        if (existing != null) {
-          serverCache[vlessUri] = ServerCache(
-            config: vlessUri,
-            name: existing.name,
-            protocol: existing.protocol,
-            lastPing: existing.lastPing,
-            lastTested: existing.lastTested,
-            successCount: existing.successCount + 1,
-            failureCount: existing.failureCount,
-            lastConnected: DateTime.now(),
-          );
-        } else {
-          serverCache[vlessUri] = ServerCache(
-            config: vlessUri,
-            name: parser.remark,
-            protocol: _getProtocol(vlessUri),
-            lastPing: ping ?? -1,
-            lastTested: DateTime.now(),
-            successCount: 1,
-            lastConnected: DateTime.now(),
-          );
-        }
-
-        lastGoodServer = vlessUri;
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('last_good_server', vlessUri);
-        unawaited(_saveCache());
-
-        debugPrint('✅ Connected successfully');
-        return true;
-      }
-      return false;
+      final prefs = await SharedPreferences.getInstance();
+      final encoded = jsonEncode(dailyStats.map((e) => e.toJson()).toList());
+      await prefs.setString('daily_stats', encoded);
     } catch (e) {
-      final existing = serverCache[vlessUri];
-      if (existing != null) {
-        serverCache[vlessUri] = ServerCache(
-          config: vlessUri,
-          name: existing.name,
-          protocol: existing.protocol,
-          lastPing: existing.lastPing,
-          lastTested: existing.lastTested,
-          successCount: existing.successCount,
-          failureCount: existing.failureCount + 1,
-        );
-        unawaited(_saveCache());
-      }
-      debugPrint('❌ Connection error: $e');
-      return false;
-    }
-  }
-
-  static Future<bool> connectToLastGoodServer() async {
-    if (lastGoodServer != null && lastGoodServer!.isNotEmpty) {
-      debugPrint('🔵 Connecting to last good server...');
-      final cached = serverCache[lastGoodServer];
-      return await connect(
-        vlessUri: lastGoodServer!,
-        ping: cached?.lastPing,
-      );
-    }
-    return false;
-  }
-
-  static Future<void> disconnect() async {
-    try {
-      _isManualDisconnect = true;
-      _cancelAutoScan = true;
-
-      if (isConnected && (sessionDownload > 0 || sessionUpload > 0)) {
-        final today = DateTime.now();
-        final todayStats = dailyStats.firstWhere(
-          (s) =>
-              s.date.year == today.year &&
-              s.date.month == today.month &&
-              s.date.day == today.day,
-          orElse: () => ConnectionStats(
-            totalDownload: 0,
-            totalUpload: 0,
-            date: today,
-          ),
-        );
-
-        dailyStats.removeWhere((s) =>
-            s.date.year == today.year &&
-            s.date.month == today.month &&
-            s.date.day == today.day);
-
-        dailyStats.add(ConnectionStats(
-          totalDownload: todayStats.totalDownload + sessionDownload,
-          totalUpload: todayStats.totalUpload + sessionUpload,
-          date: today,
-        ));
-
-        await _saveStats();
-      }
-
-      await v2ray.stopV2Ray();
-      debugPrint('✅ Disconnected');
-
-      await refreshNetworkProfile();
-    } catch (e) {
-      debugPrint('❌ Disconnect error: $e');
-    } finally {
-      isConnected = false;
-      currentConnectedConfig = null;
-      currentConnectedPing = null;
-      sessionDownload = 0;
-      sessionUpload = 0;
-      _lastConnectionTime = null;
-      connectionStateController.add(false);
+      debugPrint('❌ Stats save error: $e');
     }
   }
 
