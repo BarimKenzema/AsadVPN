@@ -89,6 +89,7 @@ class VPNService {
   static final StreamController<int> scanProgressController =
       StreamController<int>.broadcast();
 
+  // ========================= STATUS =========================
   static void _updateConnectionState(V2RayStatus status) {
     final newIsConnected = status.state == 'CONNECTED';
 
@@ -131,6 +132,7 @@ class VPNService {
     });
   }
 
+  // ========================= NET / CONTROL =========================
   static Future<bool> hasInternetConnection() async {
     try {
       final connectivityResult = await Connectivity().checkConnectivity();
@@ -156,6 +158,18 @@ class VPNService {
     }
   }
 
+  // RE-ADDED: used by main.dart on app resume
+  static void resumeAutoScan() {
+    if (!isConnected &&
+        fastestServers.length < 11 &&
+        currentSubscriptionLink != null &&
+        !_isBackgroundScanning) {
+      debugPrint('🔵 Resuming auto-scan from index $_lastScannedIndex...');
+      unawaited(_autoScanServers(resumeFromIndex: _lastScannedIndex));
+    }
+  }
+
+  // ========================= INIT =========================
   static Future<void> init() async {
     try {
       debugPrint('🔵 Initializing VPN Service...');
@@ -217,7 +231,8 @@ class VPNService {
     }
   }
 
-  // AUTO-SCAN: fast TCP prefilter + quick V2Ray verify (2s) until 11 servers
+  // ========================= AUTO-SCAN =========================
+  // fast TCP prefilter + quick V2Ray verify (2s) until 11 servers
   static Future<void> _autoScanServers({int resumeFromIndex = 0}) async {
     if (_isBackgroundScanning) {
       debugPrint('⚠️ Auto-scan already running, skipping');
@@ -280,7 +295,6 @@ class VPNService {
         final config = tcpOk[i];
         final result = await _testServerWithPing(config, timeout: bgVerifyTimeout);
         if (result != null && !isConnected) {
-          // Add if not present and cap at 11
           if (!fastestServers.any((s) => s.config == result.config)) {
             fastestServers.add(result);
             fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
@@ -321,12 +335,13 @@ class VPNService {
             _handleDisconnect();
           }
         } catch (e) {
-            debugPrint('❌ Health check error: $e');
+          debugPrint('❌ Health check error: $e');
         }
       }
     });
   }
 
+  // ========================= LOAD / SAVE =========================
   static Future<void> _loadCache() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -437,6 +452,7 @@ class VPNService {
     unawaited(_savePersistentLists());
   }
 
+  // ========================= SUBSCRIPTION =========================
   static Future<bool> validateSubscription() async {
     if (currentSubscriptionLink == null || currentSubscriptionLink!.isEmpty) {
       isSubscriptionValid = false;
@@ -528,7 +544,7 @@ class VPNService {
     }
   }
 
-  // Connect selection
+  // ========================= CONNECT FLOW =========================
   static Future<Map<String, dynamic>> scanAndSelectBestServer({bool connectImmediately = true}) async {
     if (_isBackgroundScanning) {
       _cancelAutoScan = true;
@@ -603,7 +619,7 @@ class VPNService {
     }
 
     // Step 0.5: Fallback to knownGoodServers if display is empty or all failed
-    if (!isConnected && (fastestServers.isEmpty || true)) {
+    if (!isConnected && fastestServers.isEmpty && knownGoodServers.isNotEmpty) {
       final fallback = _fallbackKnownConfigs();
       if (fallback.isNotEmpty) {
         debugPrint('🔵 Fallback: testing known-good pool (${fallback.length})...');
@@ -613,7 +629,6 @@ class VPNService {
               await _testServerWithPing(cfg, timeout: userTestTimeout).timeout(userTestTimeout, onTimeout: () => null);
           if (result != null) {
             isScanning = false;
-            // update runtime and persist
             if (!fastestServers.any((s) => s.config == result.config)) {
               fastestServers.add(result);
               fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
@@ -669,7 +684,8 @@ class VPNService {
     return knownGoodServers.where((c) => !displayed.contains(c)).toList();
   }
 
-  // Prioritization: top servers first; then cached good; then newest (reversed) and shuffled
+  // ========================= PRIORITY =========================
+  // top servers first; then cached good; then newest (reversed) and shuffled
   static List<String> _prioritizeServers() {
     final Set<String> processed = {};
     final List<String> result = [];
@@ -709,6 +725,7 @@ class VPNService {
     await _savePersistentLists();
   }
 
+  // ========================= TESTS =========================
   // Patch config for DNS-over-HTTPS and IPv4 preference (helps on ISPs with DNS/SNI issues)
   static String _ensureDnsAndIPv4(String config) {
     try {
@@ -754,7 +771,7 @@ class VPNService {
           lastPing: delay,
           lastTested: DateTime.now(),
           successCount: (existing?.successCount ?? 0) + 1,
-          failureCount: existing?.failureCount ?? 0,
+          failureCount: (existing?.failureCount ?? 0),
           lastConnected: existing?.lastConnected,
         );
         unawaited(_saveCache());
@@ -912,6 +929,7 @@ class VPNService {
     return 'UNKNOWN';
   }
 
+  // ========================= CONNECT / DISCONNECT =========================
   static Future<bool> connect({required String vlessUri, int? ping}) async {
     if (kIsWeb || !Platform.isAndroid) return false;
 
