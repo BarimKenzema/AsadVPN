@@ -2,11 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_v2ray/flutter_v2ray.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+
 import '../models/server_cache.dart';
 
 class ServerInfo {
@@ -27,14 +29,6 @@ class ServerInfo {
   });
 }
 
-// Simple tuple for host:port
-class _HostPort {
-  final String host;
-  final int port;
-  _HostPort(this.host, this.port);
-}
-
-// Custom exception for network errors
 class NetworkException implements Exception {
   final String message;
   NetworkException(this.message);
@@ -45,11 +39,17 @@ class NetworkException implements Exception {
 class VPNService {
   static final V2ray v2ray = V2ray(onStatusChanged: _updateConnectionState);
 
+  // Timeouts and concurrency knobs
+  static const Duration userTestTimeout = Duration(seconds: 4); // user taps Connect
+  static const Duration bgVerifyTimeout = Duration(seconds: 2); // background verify
+  static const Duration tcpFastTimeout = Duration(milliseconds: 400); // TCP prefilter
+  static const int tcpFastConcurrency = 120; // high concurrency for TCP prefilter
+
   static bool isConnected = false;
   static bool isSubscriptionValid = false;
   static String? currentSubscriptionLink;
   static List<String> configServers = [];
-  static List<ServerInfo> fastestServers = [];
+  static List<ServerInfo> fastestServers = []; // display list (up to 11)
   static bool isScanning = false;
   static String? currentConnectedConfig;
   static int? currentConnectedPing;
@@ -59,15 +59,19 @@ class VPNService {
   // Caching
   static Map<String, ServerCache> serverCache = {};
   static String? lastGoodServer;
-  static List<String> topServers = [];
-  static Set<String> scannedServers = {};
+
+  // Persistent lists
+  static List<String> topServers = []; // display 11
+  static List<String> knownGoodServers = []; // persistent pool (up to 50)
+
+  static Set<String> scannedServers = {}; // optional: prevent immediate re-scan churn
 
   // Stats
   static int sessionDownload = 0;
   static int sessionUpload = 0;
   static List<ConnectionStats> dailyStats = [];
 
-  // Background scanning / auto-scan, cancel & progress
+  // Background scanning
   static Timer? _healthCheckTimer;
   static bool _isBackgroundScanning = false;
   static DateTime? _lastConnectionTime;
@@ -75,13 +79,6 @@ class VPNService {
   static bool _cancelScan = false;
   static bool _cancelAutoScan = false;
   static int _lastScannedIndex = 0;
-
-  // Fast prefilter knobs (only when NOT connected)
-  // Try many sockets in parallel to quickly drop dead configs.
-  static const int _fastTcpTimeoutMs = 300; // quick socket timeout per target
-  static const int _fastPrefilterConcurrency = 60; // high concurrency
-  // v2ray delay test timeout
-  static const Duration _delayTimeout = Duration(seconds: 4); // RELIABLE
 
   static final StreamController<List<ServerInfo>> serversStreamController =
       StreamController<List<ServerInfo>>.broadcast();
@@ -107,13 +104,11 @@ class VPNService {
       connectionStateController.add(isConnected);
       debugPrint('🔵 V2Ray status changed to: ${status.state}');
 
-      // Cancel auto-scan if connection happens
       if (newIsConnected && _isBackgroundScanning) {
         _cancelAutoScan = true;
         debugPrint('🛑 Cancelling auto-scan (connection established)');
       }
 
-      // If disconnected unexpectedly (NOT manual), try to reconnect
       if (!newIsConnected && currentConnectedConfig != null && !_isManualDisconnect) {
         debugPrint('⚠️ Unexpected disconnect detected');
         _handleDisconnect();
@@ -143,7 +138,7 @@ class VPNService {
         debugPrint('❌ No internet connection (connectivity check)');
         return false;
       }
-      final result = await InternetAddress.lookup('google.com')
+      final result = await InternetAddress.lookup('cloudflare.com')
           .timeout(const Duration(seconds: 5));
       final hasConnection = result.isNotEmpty && result[0].rawAddress.isNotEmpty;
       debugPrint(hasConnection ? '✅ Internet connection OK' : '❌ No internet connection');
@@ -161,16 +156,6 @@ class VPNService {
     }
   }
 
-  static void resumeAutoScan() {
-    if (!isConnected &&
-        fastestServers.length < 11 &&
-        currentSubscriptionLink != null &&
-        !_isBackgroundScanning) {
-      debugPrint('🔵 Resuming auto-scan from index $_lastScannedIndex...');
-      unawaited(_autoScanServers(resumeFromIndex: _lastScannedIndex));
-    }
-  }
-
   static Future<void> init() async {
     try {
       debugPrint('🔵 Initializing VPN Service...');
@@ -183,18 +168,16 @@ class VPNService {
       await _loadCache();
       await _loadStats();
       await _loadScannedServers();
+      await _loadPersistentLists();
 
       final prefs = await SharedPreferences.getInstance();
       currentSubscriptionLink = prefs.getString('subscription_link');
       lastGoodServer = prefs.getString('last_good_server');
       _lastScannedIndex = prefs.getInt('last_scanned_index') ?? 0;
 
-      final topServersList = prefs.getStringList('top_servers');
-      if (topServersList != null) {
-        topServers = topServersList;
-        debugPrint('🔵 Loaded ${topServers.length} top servers from cache');
-
-        fastestServers = topServersList
+      // Preload display from topServers using cache
+      if (topServers.isNotEmpty) {
+        fastestServers = topServers
             .map((config) {
               final cached = serverCache[config];
               if (cached != null) {
@@ -211,7 +194,6 @@ class VPNService {
             })
             .whereType<ServerInfo>()
             .toList();
-
         if (fastestServers.isNotEmpty) {
           serversStreamController.add(List.from(fastestServers));
           debugPrint('🔵 Loaded ${fastestServers.length} servers for display');
@@ -220,7 +202,7 @@ class VPNService {
 
       debugPrint('🔵 Init complete. Subscription link exists: ${currentSubscriptionLink != null}');
 
-      // Auto-scan for 11 servers if we have subscription and not connected
+      // Auto discovery when not connected and fewer than 11 in display
       if (currentSubscriptionLink != null &&
           currentSubscriptionLink!.isNotEmpty &&
           !isConnected &&
@@ -235,7 +217,7 @@ class VPNService {
     }
   }
 
-  // Auto-scan with FAST PREFILTER (only when NOT connected)
+  // AUTO-SCAN: fast TCP prefilter + quick V2Ray verify (2s) until 11 servers
   static Future<void> _autoScanServers({int resumeFromIndex = 0}) async {
     if (_isBackgroundScanning) {
       debugPrint('⚠️ Auto-scan already running, skipping');
@@ -246,7 +228,7 @@ class VPNService {
     _cancelAutoScan = false;
 
     if (resumeFromIndex == 0) {
-      await Future.delayed(const Duration(milliseconds: 600));
+      await Future.delayed(const Duration(milliseconds: 400));
     }
 
     if (isConnected) {
@@ -265,67 +247,51 @@ class VPNService {
         }
       }
 
-      final startMsg = resumeFromIndex > 0 ? 'resuming from index $resumeFromIndex' : 'starting fresh';
-      debugPrint('🔵 Auto-scan (fast prefilter): $startMsg');
+      final startMsg =
+          resumeFromIndex > 0 ? 'resuming from index $resumeFromIndex' : 'starting fresh';
+      debugPrint('🔵 Auto-scan: Finding 11 servers ($startMsg)...');
 
-      // Build prioritized (shuffled) list
       final prioritized = _prioritizeServers();
 
-      // FAST PREFILTER (TCP reachability, high concurrency)
-      final List<String> subset = prioritized.sublist(
-        min(resumeFromIndex, prioritized.length),
-        prioritized.length,
+      // Stage A: TCP prefilter (very fast)
+      final remaining = prioritized.sublist(resumeFromIndex);
+      debugPrint('⚡ TCP prefiltering ${remaining.length} servers with concurrency $tcpFastConcurrency...');
+      final tcpOk = await _tcpPrefilterConfigs(
+        remaining,
+        timeout: tcpFastTimeout,
+        concurrency: tcpFastConcurrency,
+        stopOnCount: 0, // scan all quickly
       );
-      final reachable = await _fastPrefilterAll(subset);
+      debugPrint('✅ TCP prefilter survivors: ${tcpOk.length}');
 
-      if (_cancelAutoScan || isConnected) {
-        debugPrint('🛑 Auto-scan cancelled or connected during prefilter');
-        return;
-      }
-
-      debugPrint('🔵 Prefilter done: ${reachable.length} candidates (TCP reachable)');
-
-      // Now do real v2ray delay test (sequential, 4s timeout) until we have 11
-      int tested = 0;
-      for (final uri in reachable) {
-        if (isConnected || _cancelAutoScan) break;
-        if (fastestServers.length >= 11) break;
-
-        // Save progress
-        if (tested % 5 == 0) {
-          _lastScannedIndex = resumeFromIndex + tested;
+      // Stage B: Verify survivors sequentially (2s) until 11 servers
+      for (int i = 0; i < tcpOk.length; i++) {
+        if ((resumeFromIndex + i) % 5 == 0) {
+          _lastScannedIndex = resumeFromIndex + i;
           await _saveProgress();
         }
 
-        tested++;
+        if (fastestServers.length >= 11 || isConnected || _cancelAutoScan) {
+          if (isConnected) debugPrint('🛑 Auto-scan stopped: User connected');
+          if (_cancelAutoScan) debugPrint('🛑 Auto-scan cancelled');
+          break;
+        }
 
-        final result = await _testServerWithPing(uri).timeout(
-          _delayTimeout,
-          onTimeout: () => null,
-        );
-        if (result != null) {
+        final config = tcpOk[i];
+        final result = await _testServerWithPing(config, timeout: bgVerifyTimeout);
+        if (result != null && !isConnected) {
+          // Add if not present and cap at 11
           if (!fastestServers.any((s) => s.config == result.config)) {
             fastestServers.add(result);
             fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+            _updatePersistentLists(newConfigs: [result.config]);
             serversStreamController.add(List.from(fastestServers));
-            debugPrint('✅ Auto-scan: Added ${result.name} (${result.ping}ms) => ${fastestServers.length}/11');
-
-            if (fastestServers.length % 3 == 0) {
-              await _updateTopServers(fastestServers.map((s) => s.config).toList());
-            }
           }
         }
       }
 
-      if (!isConnected && fastestServers.isNotEmpty) {
-        await _updateTopServers(fastestServers.map((s) => s.config).toList());
-        if (fastestServers.length >= 11) {
-          debugPrint('🎉 Auto-scan SUCCESS: 11 servers ready!');
-          _lastScannedIndex = 0;
-          await _saveProgress();
-        } else {
-          debugPrint('📊 Auto-scan paused: ${fastestServers.length}/11 servers (will resume at index $_lastScannedIndex)');
-        }
+      if (!isConnected) {
+        _updatePersistentLists(); // persist after pass
       }
     } catch (e) {
       debugPrint('❌ Auto-scan error: $e');
@@ -335,78 +301,12 @@ class VPNService {
     }
   }
 
-  // Fast prefilter phase: run many simultaneous TCP connects with tiny timeout
-  static Future<List<String>> _fastPrefilterAll(List<String> uris) async {
-    final reachable = <String>[];
-    if (uris.isEmpty) return reachable;
-
-    await _forEachWithConcurrency<String>(
-      uris,
-      _fastPrefilterConcurrency,
-      (uri) async {
-        if (_cancelAutoScan || isConnected) return;
-        final hp = _extractHostPort(uri);
-        if (hp == null) return;
-        final ok = await _tcpReachable(hp.host, hp.port, Duration(milliseconds: _fastTcpTimeoutMs));
-        if (ok) {
-          reachable.add(uri);
-        }
-      },
-    );
-    return reachable;
-  }
-
-  static Future<bool> _tcpReachable(String host, int port, Duration timeout) async {
-    try {
-      final socket = await Socket.connect(host, port, timeout: timeout);
-      socket.destroy();
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  static Future<void> _forEachWithConcurrency<T>(
-    List<T> items,
-    int concurrency,
-    Future<void> Function(T item) worker,
-  ) async {
-    int index = 0;
-    Future<void> runner() async {
-      while (true) {
-        if (_cancelAutoScan || isConnected) return;
-        final i = index;
-        if (i >= items.length) break;
-        index = i + 1;
-        try {
-          await worker(items[i]);
-        } catch (_) {}
-      }
-    }
-
-    final count = min(concurrency, items.length);
-    await Future.wait(List.generate(count, (_) => runner()));
-  }
-
   static Future<void> _saveProgress() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setInt('last_scanned_index', _lastScannedIndex);
     } catch (e) {
       debugPrint('❌ Save progress error: $e');
-    }
-  }
-
-  static Future<void> _loadScannedServers() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final scannedList = prefs.getStringList('scanned_servers');
-      if (scannedList != null) {
-        scannedServers = scannedList.toSet();
-        debugPrint('✅ Loaded ${scannedServers.length} scanned servers');
-      }
-    } catch (e) {
-      debugPrint('❌ Scanned servers load error: $e');
     }
   }
 
@@ -421,7 +321,7 @@ class VPNService {
             _handleDisconnect();
           }
         } catch (e) {
-          debugPrint('❌ Health check error: $e');
+            debugPrint('❌ Health check error: $e');
         }
       }
     });
@@ -433,9 +333,7 @@ class VPNService {
       final cacheJson = prefs.getString('server_cache');
       if (cacheJson != null) {
         final Map<String, dynamic> decoded = jsonDecode(cacheJson);
-        serverCache = decoded.map(
-          (key, value) => MapEntry(key, ServerCache.fromJson(value)),
-        );
+        serverCache = decoded.map((key, value) => MapEntry(key, ServerCache.fromJson(value)));
         debugPrint('✅ Loaded ${serverCache.length} cached servers');
       }
     } catch (e) {
@@ -478,6 +376,67 @@ class VPNService {
     }
   }
 
+  static Future<void> _loadScannedServers() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final scannedList = prefs.getStringList('scanned_servers');
+      if (scannedList != null) {
+        scannedServers = scannedList.toSet();
+        debugPrint('✅ Loaded ${scannedServers.length} scanned servers');
+      }
+    } catch (e) {
+      debugPrint('❌ Scanned servers load error: $e');
+    }
+  }
+
+  static Future<void> _loadPersistentLists() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      topServers = prefs.getStringList('top_servers') ?? [];
+      knownGoodServers = prefs.getStringList('known_good_servers') ?? [];
+      debugPrint('✅ Loaded top: ${topServers.length}, knownGood: ${knownGoodServers.length}');
+    } catch (e) {
+      debugPrint('❌ Persistent lists load error: $e');
+    }
+  }
+
+  static Future<void> _savePersistentLists() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList('top_servers', topServers);
+      await prefs.setStringList('known_good_servers', knownGoodServers);
+    } catch (e) {
+      debugPrint('❌ Persistent lists save error: $e');
+    }
+  }
+
+  // Merge new configs into knownGood, refresh topServers from fastestServers (up to 11)
+  static void _updatePersistentLists({List<String> newConfigs = const []}) {
+    // merge into knownGood (dedupe, keep up to 50)
+    if (newConfigs.isNotEmpty) {
+      for (final c in newConfigs) {
+        knownGoodServers.remove(c);
+        knownGoodServers.insert(0, c);
+      }
+    }
+    // ensure all displayed are in knownGood
+    for (final s in fastestServers) {
+      knownGoodServers.remove(s.config);
+      knownGoodServers.insert(0, s.config);
+    }
+    // cap knownGood
+    if (knownGoodServers.length > 50) {
+      knownGoodServers = knownGoodServers.take(50).toList();
+    }
+
+    // build topServers from current display up to 11; if less, fill from knownGood
+    final current = fastestServers.map((s) => s.config).toList();
+    final fill = knownGoodServers.where((c) => !current.contains(c)).take(11 - current.length);
+    topServers = [...current, ...fill].take(11).toList();
+
+    unawaited(_savePersistentLists());
+  }
+
   static Future<bool> validateSubscription() async {
     if (currentSubscriptionLink == null || currentSubscriptionLink!.isEmpty) {
       isSubscriptionValid = false;
@@ -487,8 +446,7 @@ class VPNService {
     try {
       debugPrint('🔵 Validating subscription...');
       final resp = await http
-          .get(Uri.parse(currentSubscriptionLink!),
-              headers: {'User-Agent': 'AsadVPN/1.0'})
+          .get(Uri.parse(currentSubscriptionLink!), headers: {'User-Agent': 'AsadVPN/1.0'})
           .timeout(const Duration(seconds: 20));
 
       if (resp.statusCode != 200 || resp.body.contains('<!DOCTYPE')) {
@@ -515,25 +473,14 @@ class VPNService {
       final trojan = lines.where((l) => l.toLowerCase().startsWith('trojan://')).toList();
       final ss = lines.where((l) => l.toLowerCase().startsWith('ss://')).toList();
 
-      debugPrint('🔵 Found: ${vless.length} VLESS, ${vmess.length} VMESS, ${trojan.length} Trojan, ${ss.length} SS');
+      debugPrint('🔵 Found: ${vless.length} VLESS, ${vmess.length} VMESS, ${trojan.length} TROJAN, ${ss.length} SS');
 
       configServers = [...vless, ...vmess, ...trojan, ...ss];
-
-      if (configServers.isEmpty) {
-        configServers = lines;
-      }
+      if (configServers.isEmpty) configServers = lines;
 
       isSubscriptionValid = configServers.isNotEmpty;
       debugPrint('✅ Subscription valid: $isSubscriptionValid, servers: ${configServers.length}');
       return isSubscriptionValid;
-    } on SocketException catch (e) {
-      isSubscriptionValid = false;
-      debugPrint('❌ Network error during validation: $e');
-      throw NetworkException('No internet connection');
-    } on TimeoutException catch (e) {
-      isSubscriptionValid = false;
-      debugPrint('❌ Timeout during validation: $e');
-      throw NetworkException('Connection timeout');
     } catch (e) {
       isSubscriptionValid = false;
       debugPrint('❌ Subscription validation error: $e');
@@ -544,7 +491,6 @@ class VPNService {
   static Future<bool> saveSubscriptionLink(String link) async {
     try {
       link = link.trim().replaceAll(RegExp(r'[\u200B-\u200D\uFEFF]'), '');
-
       if (!link.startsWith('http')) return false;
 
       final prefs = await SharedPreferences.getInstance();
@@ -582,7 +528,7 @@ class VPNService {
     }
   }
 
-  // Connect flow: 1) test displayed servers first, then 2) scan new (shuffled), all with 4s timeout.
+  // Connect selection
   static Future<Map<String, dynamic>> scanAndSelectBestServer({bool connectImmediately = true}) async {
     if (_isBackgroundScanning) {
       _cancelAutoScan = true;
@@ -599,14 +545,8 @@ class VPNService {
     }
 
     if (configServers.isEmpty) {
-      try {
-        final valid = await validateSubscription();
-        if (!valid) {
-          return {'success': false, 'error': 'Invalid subscription or no servers'};
-        }
-      } on NetworkException {
-        return {'success': false, 'error': 'No internet connection'};
-      }
+      final valid = await validateSubscription();
+      if (!valid) return {'success': false, 'error': 'Invalid subscription or no servers'};
     }
 
     isScanning = true;
@@ -616,90 +556,99 @@ class VPNService {
     totalToScan = 0;
     scanProgressController.add(0);
 
-    // STEP 0: Test displayed servers FIRST (fastest first)
+    // Step 0: Test displayed servers first (SOFT-FAIL: do not delete on single failure)
     if (fastestServers.isNotEmpty) {
       debugPrint('🔵 Testing ${fastestServers.length} displayed servers first...');
-      final sortedDisplayed = List<ServerInfo>.from(fastestServers)..sort((a, b) => a.ping.compareTo(b.ping));
+      final sortedDisplayed = List<ServerInfo>.from(fastestServers)
+        ..sort((a, b) => a.ping.compareTo(b.ping));
 
       for (int i = 0; i < sortedDisplayed.length && !_cancelScan; i++) {
         debugPrint('🔵 Testing displayed server ${i + 1}/${sortedDisplayed.length}: ${sortedDisplayed[i].name}...');
-        final result = await _testServerWithPing(sortedDisplayed[i].config).timeout(
-          _delayTimeout,
-          onTimeout: () {
-            debugPrint('⏱️ Displayed server timeout (${sortedDisplayed[i].name})');
-            return null;
-          },
-        );
+        final result =
+            await _testServerWithPing(sortedDisplayed[i].config, timeout: userTestTimeout)
+                .timeout(userTestTimeout, onTimeout: () => null);
 
         if (result != null) {
           debugPrint('✅ Displayed server working: ${result.name} (${result.ping}ms)');
           if (connectImmediately) {
             isScanning = false;
-
-            final index = fastestServers.indexWhere((s) => s.config == result.config);
+            final index =
+                fastestServers.indexWhere((s) => s.config == result.config);
             if (index != -1) {
               fastestServers[index] = result;
               fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
               serversStreamController.add(List.from(fastestServers));
             }
-
+            _updatePersistentLists();
             await connect(vlessUri: result.config, ping: result.ping);
             debugPrint('🔵 Connected to displayed server');
             return {'success': true, 'server': result.config, 'ping': result.ping};
           }
         } else {
-          // Remove dead server from displayed list
-          debugPrint('❌ Removing dead server: ${sortedDisplayed[i].name}');
-          fastestServers.removeWhere((s) => s.config == sortedDisplayed[i].config);
-          topServers.removeWhere((c) => c == sortedDisplayed[i].config);
-          await _updateTopServers(topServers);
-          serversStreamController.add(List.from(fastestServers));
+          debugPrint('⚠️ Soft-fail (demote): ${sortedDisplayed[i].name}');
+          _recordFailure(sortedDisplayed[i].config);
+          final idx = fastestServers.indexWhere((s) => s.config == sortedDisplayed[i].config);
+          if (idx != -1) {
+            final s = fastestServers.removeAt(idx);
+            fastestServers.add(s); // demote to bottom
+            serversStreamController.add(List.from(fastestServers));
+          }
         }
       }
-
       if (_cancelScan) {
         isScanning = false;
         _cancelScan = false;
         return {'success': false, 'error': 'Scan cancelled'};
       }
+    }
 
-      if (fastestServers.isEmpty) {
-        debugPrint('⚠️ All displayed servers failed, scanning for new ones...');
+    // Step 0.5: Fallback to knownGoodServers if display is empty or all failed
+    if (!isConnected && (fastestServers.isEmpty || true)) {
+      final fallback = _fallbackKnownConfigs();
+      if (fallback.isNotEmpty) {
+        debugPrint('🔵 Fallback: testing known-good pool (${fallback.length})...');
+        for (int i = 0; i < min(11, fallback.length) && !_cancelScan && !isConnected; i++) {
+          final cfg = fallback[i];
+          final result =
+              await _testServerWithPing(cfg, timeout: userTestTimeout).timeout(userTestTimeout, onTimeout: () => null);
+          if (result != null) {
+            isScanning = false;
+            // update runtime and persist
+            if (!fastestServers.any((s) => s.config == result.config)) {
+              fastestServers.add(result);
+              fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+              serversStreamController.add(List.from(fastestServers));
+            }
+            _updatePersistentLists(newConfigs: [result.config]);
+            await connect(vlessUri: result.config, ping: result.ping);
+            debugPrint('🔵 Connected from known-good pool');
+            return {'success': true, 'server': result.config, 'ping': result.ping};
+          }
+        }
       }
     }
 
-    // STEP 1: Scan new servers (PRIORITIZED + SHUFFLED)
-    debugPrint('🔵 Scanning for new servers (shuffled)...');
+    // Step 1: Scan new servers (newest + shuffled), 4s test
+    debugPrint('🔵 Scanning for new servers (starting from newest + shuffled)...');
     final prioritized = _prioritizeServers();
-
     int tested = 0;
     for (var config in prioritized) {
       if (tested >= 30 || _cancelScan) break;
       tested++;
       debugPrint('🔵 Testing new server $tested/30...');
-
-      final result = await _testServerWithPing(config).timeout(
-        _delayTimeout,
-        onTimeout: () {
-          debugPrint('⏱️ New server test timeout');
-          return null;
-        },
-      );
-
+      final result = await _testServerWithPing(config, timeout: userTestTimeout)
+          .timeout(userTestTimeout, onTimeout: () => null);
       if (result != null) {
         debugPrint('✅ Found working server: ${result.name} (${result.ping}ms)');
         if (connectImmediately) {
           isScanning = false;
-
           if (!fastestServers.any((s) => s.config == result.config)) {
             fastestServers.add(result);
             fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
             serversStreamController.add(List.from(fastestServers));
           }
-
-          await _updateTopServers(fastestServers.map((s) => s.config).toList());
+          _updatePersistentLists(newConfigs: [result.config]);
           await connect(vlessUri: result.config, ping: result.ping);
-
           debugPrint('🔵 Connected to new server');
           return {'success': true, 'server': result.config, 'ping': result.ping};
         }
@@ -707,21 +656,24 @@ class VPNService {
     }
 
     isScanning = false;
-
     if (_cancelScan) {
       _cancelScan = false;
       return {'success': false, 'error': 'Scan cancelled'};
     }
-
     return {'success': false, 'error': 'No working servers found'};
   }
 
-  // Prioritize & SHUFFLE
+  static List<String> _fallbackKnownConfigs() {
+    // knownGood minus what’s already displayed, keep newest-first order
+    final displayed = fastestServers.map((s) => s.config).toSet();
+    return knownGoodServers.where((c) => !displayed.contains(c)).toList();
+  }
+
+  // Prioritization: top servers first; then cached good; then newest (reversed) and shuffled
   static List<String> _prioritizeServers() {
     final Set<String> processed = {};
     final List<String> result = [];
 
-    // 1) Top servers first
     for (var config in topServers) {
       if (configServers.contains(config) && !processed.contains(config)) {
         result.add(config);
@@ -729,7 +681,6 @@ class VPNService {
       }
     }
 
-    // 2) Good cached
     final goodCached = serverCache.entries
         .where((e) =>
             e.value.successRate > 0.7 &&
@@ -739,34 +690,56 @@ class VPNService {
         .map((e) => e.key)
         .where((c) => !processed.contains(c))
         .toList();
-    goodCached.shuffle(Random());
     result.addAll(goodCached);
     processed.addAll(goodCached);
 
-    // 3) Rest (SHUFFLED)
     final remaining = configServers
         .where((c) => !processed.contains(c) && !topServers.contains(c) && !scannedServers.contains(c))
-        .toList()
-      ..shuffle(Random());
-    result.addAll(remaining);
+        .toList();
+
+    // Newest first, then shuffle to avoid same-order bias
+    final reversed = remaining.reversed.toList()..shuffle(Random());
+    result.addAll(reversed);
 
     return result;
   }
 
   static Future<void> _updateTopServers(List<String> servers) async {
     topServers = servers.take(11).toList();
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList('top_servers', topServers);
-    debugPrint('💾 Saved ${topServers.length} top servers');
+    await _savePersistentLists();
   }
 
-  static Future<ServerInfo?> _testServerWithPing(String uri) async {
+  // Patch config for DNS-over-HTTPS and IPv4 preference (helps on ISPs with DNS/SNI issues)
+  static String _ensureDnsAndIPv4(String config) {
+    try {
+      final Map<String, dynamic> json = jsonDecode(config);
+      json['dns'] ??= {};
+      json['dns']['servers'] = [
+        'https://1.1.1.1/dns-query',
+        'https://dns.google/dns-query',
+        '1.1.1.1',
+        '8.8.8.8',
+      ];
+      json['routing'] ??= {};
+      json['routing']['domainStrategy'] = 'UseIPv4';
+      return jsonEncode(json);
+    } catch (_) {
+      return config; // if parsing fails, use original
+    }
+  }
+
+  // Single V2Ray delay test with customizable timeout
+  static Future<ServerInfo?> _testServerWithPing(String uri, {Duration? timeout}) async {
     try {
       final parser = V2ray.parseFromURL(uri);
-      final config = parser.getFullConfiguration();
+      var config = parser.getFullConfiguration();
 
+      // Patch config for DoH + IPv4 preference to survive hostile ISPs
+      config = _ensureDnsAndIPv4(config);
+
+      final effectiveTimeout = timeout ?? userTestTimeout;
       final delay = await v2ray.getServerDelay(config: config).timeout(
-        _delayTimeout,
+        effectiveTimeout,
         onTimeout: () => -1,
       );
 
@@ -794,108 +767,140 @@ class VPNService {
           successRate: serverCache[uri]!.successRate,
         );
       } else {
-        final existing = serverCache[uri];
-        if (existing != null) {
-          serverCache[uri] = ServerCache(
-            config: uri,
-            name: existing.name,
-            protocol: existing.protocol,
-            lastPing: existing.lastPing,
-            lastTested: DateTime.now(),
-            successCount: existing.successCount,
-            failureCount: existing.failureCount + 1,
-          );
-          unawaited(_saveCache());
-        }
+        _recordFailure(uri);
       }
       return null;
     } catch (e) {
+      _recordFailure(uri);
       return null;
     }
   }
 
-  // Extract host:port from different schemes to do a TCP prefilter
-  static _HostPort? _extractHostPort(String uri) {
+  static void _recordFailure(String uri) {
+    final existing = serverCache[uri];
+    if (existing != null) {
+      serverCache[uri] = ServerCache(
+        config: uri,
+        name: existing.name,
+        protocol: existing.protocol,
+        lastPing: existing.lastPing,
+        lastTested: DateTime.now(),
+        successCount: existing.successCount,
+        failureCount: existing.failureCount + 1,
+        lastConnected: existing.lastConnected,
+      );
+      unawaited(_saveCache());
+    }
+  }
+
+  // QUICK TCP PREFILTER (stage A)
+  static Future<List<String>> _tcpPrefilterConfigs(
+    List<String> configs, {
+    required Duration timeout,
+    required int concurrency,
+    int stopOnCount = 0, // stop early if survivors reach this
+  }) async {
+    final survivors = <String>[];
+    int index = 0;
+
+    Future<void> worker() async {
+      while (true) {
+        if (isConnected || _cancelAutoScan) break;
+        final i = index++;
+        if (i >= configs.length) break;
+
+        final config = configs[i];
+        final hp = _extractHostPort(config);
+        if (hp == null) continue;
+
+        final ok = await _tcpProbe(hp.$1, hp.$2, timeout);
+        if (ok) {
+          survivors.add(config);
+          if (stopOnCount > 0 && survivors.length >= stopOnCount) break;
+        }
+      }
+    }
+
+    final workers = List.generate(concurrency, (_) => worker());
+    await Future.wait(workers);
+
+    return survivors;
+  }
+
+  static Future<bool> _tcpProbe(String host, int port, Duration timeout) async {
     try {
-      if (uri.startsWith('vmess://')) {
-        final b64 = uri.substring(8);
-        final fixed = _fixBase64(b64);
-        final jsonStr = utf8.decode(base64.decode(fixed));
-        final map = jsonDecode(jsonStr);
-        final host = (map['add'] ?? '').toString();
-        final port = int.tryParse((map['port'] ?? '').toString()) ?? map['port'] ?? 0;
-        if (host.isNotEmpty && port > 0) return _HostPort(host, port);
-        return null;
-      }
-
-      if (uri.startsWith('vless://') || uri.startsWith('trojan://')) {
-        final i = uri.indexOf('://');
-        var rest = uri.substring(i + 3);
-        final at = rest.lastIndexOf('@');
-        if (at != -1) rest = rest.substring(at + 1);
-        // Cut params
-        rest = rest.split('?').first.split('#').first.split('/').first;
-        // IPv6
-        if (rest.startsWith('[')) {
-          final close = rest.indexOf(']');
-          if (close > 0) {
-            final host = rest.substring(1, close);
-            final after = rest.substring(close + 1);
-            final portStr = after.startsWith(':') ? after.substring(1) : '';
-            final port = int.tryParse(portStr) ?? 0;
-            if (host.isNotEmpty && port > 0) return _HostPort(host, port);
-          }
-          return null;
-        } else {
-          final lastColon = rest.lastIndexOf(':');
-          if (lastColon > 0) {
-            final host = rest.substring(0, lastColon);
-            final port = int.tryParse(rest.substring(lastColon + 1)) ?? 0;
-            if (host.isNotEmpty && port > 0) return _HostPort(host, port);
-          }
-          return null;
-        }
-      }
-
-      if (uri.startsWith('ss://')) {
-        final raw = uri.substring(5);
-        String work = raw.split('#').first; // drop tag
-        if (work.contains('@')) {
-          // ss://method:pass@host:port
-          final afterAt = work.split('@').last;
-          final hp = afterAt.split('?').first.split('/').first;
-          final lastColon = hp.lastIndexOf(':');
-          if (lastColon > 0) {
-            final host = hp.substring(0, lastColon);
-            final port = int.tryParse(hp.substring(lastColon + 1)) ?? 0;
-            if (host.isNotEmpty && port > 0) return _HostPort(host, port);
-          }
-        } else {
-          // ss://BASE64(method:pass@host:port)
-          final fixed = _fixBase64(work);
-          final decoded = utf8.decode(base64.decode(fixed));
-          final afterAt = decoded.split('@').last;
-          final hp = afterAt.split('?').first.split('/').first;
-          final lastColon = hp.lastIndexOf(':');
-          if (lastColon > 0) {
-            final host = hp.substring(0, lastColon);
-            final port = int.tryParse(hp.substring(lastColon + 1)) ?? 0;
-            if (host.isNotEmpty && port > 0) return _HostPort(host, port);
-          }
-        }
-        return null;
-      }
-
-      return null;
+      final socket = await Socket.connect(host, port, timeout: timeout);
+      socket.destroy();
+      return true;
     } catch (_) {
-      return null;
+      return false;
     }
   }
 
-  static String _fixBase64(String b64) {
-    var s = b64.trim().replaceAll('\n', '');
-    final mod = s.length % 4;
-    if (mod > 0) s += '=' * (4 - mod);
+  static (String, int)? _extractHostPort(String uri) {
+    try {
+      if (uri.startsWith('vless://') || uri.startsWith('trojan://') || uri.startsWith('ss://')) {
+        if (uri.startsWith('ss://')) {
+          final hp = _parseSSHostPort(uri);
+          if (hp != null) return hp;
+        } else {
+          final u = Uri.parse(uri);
+          final host = u.host;
+          final port = u.port != 0 ? u.port : 443;
+          if (host.isNotEmpty) return (host, port);
+        }
+      } else if (uri.startsWith('vmess://')) {
+        final hp = _parseVMessHostPort(uri);
+        if (hp != null) return hp;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  static (String, int)? _parseVMessHostPort(String uri) {
+    try {
+      final b64 = uri.substring('vmess://'.length);
+      final jsonStr = utf8.decode(base64.decode(_normalizeB64(b64)));
+      final map = jsonDecode(jsonStr) as Map<String, dynamic>;
+      final host = (map['add'] ?? '').toString();
+      final port = int.tryParse((map['port'] ?? '').toString()) ?? 443;
+      if (host.isNotEmpty) return (host, port);
+    } catch (_) {}
+    return null;
+  }
+
+  static (String, int)? _parseSSHostPort(String uri) {
+    try {
+      var rest = uri.substring('ss://'.length);
+      if (rest.contains('@')) {
+        final u = Uri.parse(uri);
+        final host = u.host;
+        final port = u.port != 0 ? u.port : 443;
+        if (host.isNotEmpty) return (host, port);
+      } else {
+        final hashIndex = rest.indexOf('#');
+        if (hashIndex != -1) rest = rest.substring(0, hashIndex);
+        final decoded = utf8.decode(base64.decode(_normalizeB64(rest)));
+        final atIndex = decoded.lastIndexOf('@');
+        if (atIndex != -1) {
+          final hostPort = decoded.substring(atIndex + 1);
+          final parts = hostPort.split(':');
+          if (parts.length == 2) {
+            final host = parts[0];
+            final port = int.tryParse(parts[1]) ?? 443;
+            if (host.isNotEmpty) return (host, port);
+          }
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  static String _normalizeB64(String b64) {
+    var s = b64.replaceAll('-', '+').replaceAll('_', '/');
+    while (s.length % 4 != 0) {
+      s += '=';
+    }
     return s;
   }
 
@@ -1060,4 +1065,5 @@ class VPNService {
   }
 }
 
+// Helper to ignore unawaited futures
 void unawaited(Future<void> future) {}
