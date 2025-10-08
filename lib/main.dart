@@ -75,6 +75,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
   StreamSubscription? connectionSub;
   StreamSubscription? statusSub;
   StreamSubscription? progressSub;
+  StreamSubscription? subscriptionExpiredSub;
   
   int downloadSpeed = 0;
   int uploadSpeed = 0;
@@ -114,6 +115,62 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
         });
       }
     });
+
+    subscriptionExpiredSub = VPNService.subscriptionExpiredController.stream.listen((message) {
+      if (mounted) {
+        // Show dialog when subscription expires
+        showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (ctx) => AlertDialog(
+            title: Row(
+              children: const [
+                Icon(Icons.error_outline, color: Colors.red, size: 32),
+                SizedBox(width: 12),
+                Text('Subscription Expired'),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  message,
+                  style: const TextStyle(fontSize: 16),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'All server data has been cleared. Please purchase a new subscription to continue.',
+                  style: TextStyle(fontSize: 14, color: Colors.grey),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton.icon(
+                onPressed: () => launchUrl(Uri.parse('https://t.me/VPNProxyTestSupport')),
+                icon: const Icon(Icons.shopping_cart),
+                label: const Text('Buy Subscription'),
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.green,
+                ),
+              ),
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _showSubscriptionDialog();
+                },
+                child: const Text('Enter New Subscription'),
+              ),
+            ],
+          ),
+        );
+        
+        // Update UI
+        setState(() {
+          status = 'Subscription Expired';
+          displayServers.clear();
+        });
+      }
+    });
   }
 
   @override
@@ -123,6 +180,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
     connectionSub?.cancel();
     statusSub?.cancel();
     progressSub?.cancel();
+    subscriptionExpiredSub?.cancel();
     super.dispose();
   }
 
@@ -573,15 +631,21 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                     ),
                   ),
                 
-                if (VPNService.currentSubscriptionLink == null || VPNService.currentSubscriptionLink!.isEmpty)
+                if (VPNService.currentSubscriptionLink == null || 
+                    VPNService.currentSubscriptionLink!.isEmpty ||
+                    VPNService.isSubscriptionExpired)
                   Padding(
                     padding: const EdgeInsets.only(top: 20),
                     child: ElevatedButton.icon(
                       onPressed: _showSubscriptionDialog,
-                      icon: const Icon(Icons.add),
-                      label: Text(l10n?.enterSubscription ?? 'Enter Subscription'),
+                      icon: Icon(VPNService.isSubscriptionExpired ? Icons.error_outline : Icons.add),
+                      label: Text(
+                        VPNService.isSubscriptionExpired 
+                            ? 'Subscription Expired - Renew Now' 
+                            : (l10n?.enterSubscription ?? 'Enter Subscription')
+                      ),
                       style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.blue,
+                        backgroundColor: VPNService.isSubscriptionExpired ? Colors.red : Colors.blue,
                         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                       ),
                     ),
@@ -589,7 +653,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
               ],
             ),
           ),
-          
+                    
           // Server list
           Container(
             height: 250,
@@ -612,7 +676,8 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                 // Scanning progress indicator
                 if (!VPNService.isConnected && 
                     VPNService.fastestServers.length < 11 && 
-                    VPNService.currentSubscriptionLink != null)
+                    VPNService.currentSubscriptionLink != null &&
+                    !VPNService.isSubscriptionExpired)
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     color: Colors.blue.withOpacity(0.1),
@@ -678,10 +743,15 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                   child: displayServers.isEmpty
                       ? Center(
                           child: Text(
-                            VPNService.isScanning
-                                ? 'Finding servers...'
-                                : (l10n?.noServers ?? 'Tap Connect to scan servers'),
-                            style: const TextStyle(color: Colors.grey, fontSize: 14),
+                            VPNService.isSubscriptionExpired
+                                ? 'Subscription expired'
+                                : (VPNService.isScanning
+                                    ? 'Finding servers...'
+                                    : (l10n?.noServers ?? 'Tap Connect to scan servers')),
+                            style: TextStyle(
+                              color: VPNService.isSubscriptionExpired ? Colors.red : Colors.grey,
+                              fontSize: 14,
+                            ),
                           ),
                         )
                       : ListView.builder(
