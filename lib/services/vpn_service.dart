@@ -1,5 +1,4 @@
-// ===================== vpn_service.dart (Part 1/2) =====================
-// Paste Part 1/2 and Part 2/2 back-to-back in the same file (vpn_service.dart)
+// lib/services/vpn_service.dart
 
 import 'dart:async';
 import 'dart:convert';
@@ -295,7 +294,6 @@ class VPNService {
       if (!isConnected && newlyAdded.isNotEmpty) {
         final toVerify = newlyAdded.take(4).toList();
         for (final cfg in toVerify) {
-          // verify with short timeout, add to display if good
           final si = await _testServerWithPing(cfg, timeout: bgVerifyTimeout);
           if (si != null) {
             if (!fastestServers.any((s) => s.config == si.config)) {
@@ -390,14 +388,13 @@ class VPNService {
       changed = true;
     }
 
-    // Persist if changed
     if (changed) {
       unawaited(_savePersistentLists());
       serversStreamController.add(List.from(fastestServers));
     }
   }
 
-  // ========================= AUTO-SCAN (unchanged core) =========================
+  // ========================= AUTO-SCAN (while app is active) =========================
   // fast TCP prefilter + quick V2Ray verify (2s) until 11 servers
   static Future<void> _autoScanServers({int resumeFromIndex = 0}) async {
     if (_isBackgroundScanning) {
@@ -660,9 +657,6 @@ class VPNService {
       final trojan = lines.where((l) => l.toLowerCase().startsWith('trojan://')).toList();
       final ss = lines.where((l) => l.toLowerCase().startsWith('ss://')).toList();
 
-      debugPrint('🔵 Found: ${vless.length} VLESS, ${vmess.length} VMESS, ${trojan.length} TROJAN, ${ss.length} SS');
-
-      // Keep the previous set for diff in _refreshSubscriptionIfDue (we compute there)
       configServers = [...vless, ...vmess, ...trojan, ...ss];
       if (configServers.isEmpty) configServers = lines;
 
@@ -717,9 +711,7 @@ class VPNService {
     }
   }
 
-  // ========================= CONNECT FLOW (continues in Part 2/2) =========================
-}
-   // ========================= CONNECT FLOW =========================
+  // ========================= CONNECT FLOW =========================
   static Future<Map<String, dynamic>> scanAndSelectBestServer({bool connectImmediately = true}) async {
     // Stop any auto-fill that might be running
     if (_isBackgroundScanning) {
@@ -1276,7 +1268,6 @@ class VPNService {
     scanProgressController.close();
   }
 }
-// ===================== end class VPNService =====================
 
 // Helper to ignore unawaited futures
 void unawaited(Future<void> future) {}
