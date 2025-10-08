@@ -82,11 +82,6 @@ class VPNService {
   static Timer? _subscriptionRefreshTimer;
   static DateTime? _lastSubRefreshAt;
   static bool _refreshInProgress = false;
-  static final Set<String> _priorityNew = <String>{}; // newly-added configs take priority
-
-  // Pruning of stale/failing servers
-  static const int _pruneFailureThreshold = 5;
-  static const Duration _pruneStaleAge = Duration(hours: 48);
 
   static final StreamController<List<ServerInfo>> serversStreamController =
       StreamController<List<ServerInfo>>.broadcast();
@@ -118,7 +113,7 @@ class VPNService {
       }
 
       if (!newIsConnected && currentConnectedConfig != null && !_isManualDisconnect) {
-        debugPrint('⚠️ Unexpected disconnect detected');
+        debugPrint('⚠️ Unexpected disconnect, attempting reconnect...');
         _handleDisconnect();
       } else if (!newIsConnected && _isManualDisconnect) {
         debugPrint('🔵 Manual disconnect, no reconnection needed');
@@ -224,122 +219,13 @@ class VPNService {
 
       debugPrint('🔵 Init complete. Subscription link exists: ${currentSubscriptionLink != null}');
 
-      // Start hourly subscription refresh
-      _startSubscriptionRefreshTimer();
-
       // Start health check
       _startHealthCheck();
+
+      // Start hourly subscription refresh
+      _startSubscriptionRefreshTimer();
     } catch (e, stack) {
       debugPrint('❌ Init error: $e\n$stack');
-    }
-  }
-
-  static Future<void> _startSubscriptionRefreshTimer() async {
-    _subscriptionRefreshTimer?.cancel();
-    _subscriptionRefreshTimer = Timer.periodic(const Duration(hours: 1), (timer) async {
-      if (!isConnected) {
-        await _refreshSubscriptionIfDue();
-      }
-    });
-  }
-
-  static Future<void> _refreshSubscriptionIfDue() async {
-    if (_refreshInProgress) return;
-
-    _refreshInProgress = true;
-    try {
-      final oldSet = Set<String>.from(configServers);
-
-      final valid = await validateSubscription();
-      if (!valid) {
-        await _onSubscriptionInvalid();
-        return;
-      }
-
-      final newSet = Set<String>.from(configServers);
-      final newlyAdded = newSet.difference(oldSet);
-      if (newlyAdded.isNotEmpty) {
-        _priorityNew.addAll(newlyAdded);
-        debugPrint('🆕 ${newlyAdded.length} new configs prioritized for scan');
-      }
-
-      // Prune stale/failing cached entries to keep lists fresh
-      _pruneStaleFailures();
-
-      _lastSubRefreshAt = DateTime.now();
-    } catch (e) {
-      debugPrint('❌ Subscription refresh error: $e');
-    } finally {
-      _refreshInProgress = false;
-    }
-  }
-
-  static Future<void> _onSubscriptionInvalid() async {
-    debugPrint('⛔ Subscription invalid/expired → disconnect and clear cached lists');
-    // Disconnect if connected
-    if (isConnected) {
-      _isManualDisconnect = true;
-      await v2ray.stopV2Ray();
-      isConnected = false;
-      currentConnectedConfig = null;
-      currentConnectedPing = null;
-      sessionDownload = 0;
-      sessionUpload = 0;
-      connectionStateController.add(false);
-    }
-
-    // Clear all lists to prevent connecting to cached servers
-    fastestServers.clear();
-    topServers.clear();
-    knownGoodServers.clear();
-    configServers.clear();
-    _priorityNew.clear();
-
-    serversStreamController.add(List.from(fastestServers));
-
-    // Save cleared state
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList('top_servers', []);
-    await prefs.setStringList('known_good_servers', []);
-  }
-
-  static void _pruneStaleFailures() {
-    final now = DateTime.now();
-    bool changed = false;
-
-    bool shouldPrune(ServerCache? cached) {
-      if (cached == null) return false;
-      if (cached.failureCount < _pruneFailureThreshold) return false;
-      if (cached.lastConnected != null) return false; // Keep if connected recently
-      if (cached.lastTested == null) return false;
-      return now.difference(cached.lastTested!).inHours > _pruneStaleAge.inHours;
-    }
-
-    // Prune from topServers and knownGoodServers
-    final toRemove = <String>{};
-
-    for (var config in topServers) {
-      if (shouldPrune(serverCache[config])) {
-        toRemove.add(config);
-      }
-    }
-
-    for (var config in knownGoodServers) {
-      if (shouldPrune(serverCache[config])) {
-        toRemove.add(config);
-      }
-    }
-
-    if (toRemove.isNotEmpty) {
-      debugPrint('🧹 Pruning ${toRemove.length} stale/failing servers from lists');
-      topServers.removeWhere(toRemove.contains);
-      knownGoodServers.removeWhere(toRemove.contains);
-      fastestServers.removeWhere((s) => toRemove.contains(s.config));
-      changed = true;
-    }
-
-    if (changed) {
-      serversStreamController.add(List.from(fastestServers));
     }
   }
 
@@ -503,13 +389,8 @@ class VPNService {
         await prefs.remove('subscription_link');
         currentSubscriptionLink = null;
       } else {
-        // Reset priority new on new subscription
-        _priorityNew.clear();
-        // Start auto-scan if not connected
-        if (!isConnected) {
-          debugPrint('🔵 New subscription validated, starting auto-scan...');
-          unawaited(_autoScanServers());
-        }
+        _lastScannedIndex = 0;
+        await prefs.setInt('last_scanned_index', _lastScannedIndex);
       }
       return valid;
     } catch (e) {
@@ -519,19 +400,6 @@ class VPNService {
   }
 
   static Future<Map<String, dynamic>> scanAndSelectBestServer({bool connectImmediately = true}) async {
-    // Cancel any running auto-scan
-    if (_isBackgroundScanning) {
-      _cancelAutoScan = true;
-      debugPrint('🛑 Cancelling auto-scan (user clicked connect)');
-      await Future.delayed(const Duration(milliseconds: 200));
-    }
-
-    // Check internet connection first
-    if (!await hasInternetConnection()) {
-      return {'success': false, 'error': 'No internet connection'};
-    }
-
-    // Validate subscription first
     if (currentSubscriptionLink == null || currentSubscriptionLink!.isEmpty) {
       return {'success': false, 'error': 'No subscription link'};
     }
@@ -542,12 +410,13 @@ class VPNService {
     }
 
     isScanning = true;
+    _cancelScan = false;
     scanProgress = 0;
     _lastConnectionTime = null;
     totalToScan = 0;
     scanProgressController.add(0);
 
-    // Step 1: Test displayed servers first (one by one)
+    // Step 0: Test displayed servers first (one by one)
     if (fastestServers.isNotEmpty) {
       debugPrint('🔵 Testing displayed servers (${fastestServers.length})...');
 
@@ -560,7 +429,7 @@ class VPNService {
         final result = await _testServerWithPing(sortedDisplayed[i].config).timeout(
           const Duration(seconds: 4),
           onTimeout: () {
-            debugPrint('⏱️ Server test timeout');
+            debugPrint('⏱️ Displayed server timeout');
             return null;
           },
         );
@@ -600,14 +469,14 @@ class VPNService {
       }
     }
 
-    // Step 2: No working displayed servers, scan new servers (one by one)
+    // Step 1: No working displayed servers, scan new servers (one by one)
     debugPrint('🔵 Scanning for new servers (one by one)...');
 
     final prioritized = _prioritizeServers();
     final List<ServerInfo> workingServers = [];
 
     for (int i = 0; i < min(30, prioritized.length) && !_cancelScan; i++) {
-      debugPrint('🔵 Testing server $i/30: ${prioritized[i]}...');
+      debugPrint('🔵 Testing server $i/30...');
 
       final result = await _testServerWithPing(prioritized[i]).timeout(
         const Duration(seconds: 4),
@@ -662,15 +531,7 @@ class VPNService {
     final Set<String> processed = {};
     final List<String> result = [];
 
-    // 1. Priority new configs first
-    for (var config in _priorityNew) {
-      if (configServers.contains(config) && !processed.contains(config)) {
-        result.add(config);
-        processed.add(config);
-      }
-    }
-
-    // 2. Top servers first
+    // 1. Top servers first
     for (var config in topServers) {
       if (configServers.contains(config) && !processed.contains(config)) {
         result.add(config);
@@ -678,7 +539,7 @@ class VPNService {
       }
     }
 
-    // 3. Cached servers with good success rate
+    // 2. Cached servers with good success rate
     final goodCached = serverCache.entries
         .where((e) => 
             e.value.successRate > 0.7 && 
@@ -690,7 +551,7 @@ class VPNService {
     result.addAll(goodCached);
     processed.addAll(goodCached);
 
-    // 4. Rest of servers (shuffled)
+    // 3. Rest of servers (shuffled)
     final remaining = configServers
         .where((c) => !processed.contains(c))
         .toList()
@@ -705,14 +566,7 @@ class VPNService {
       final parser = V2ray.parseFromURL(uri);
       final config = parser.getFullConfiguration();
 
-      // Add internal timeout to the actual delay check
-      final delay = await v2ray.getServerDelay(config: config).timeout(
-        const Duration(seconds: 3),
-        onTimeout: () {
-          debugPrint('⏱️ Internal delay check timeout for ${parser.remark}');
-          return -1;
-        },
-      );
+      final delay = await v2ray.getServerDelay(config: config);
 
       if (delay != -1 && delay < 5000) {
         debugPrint('✅ ${parser.remark}: ${delay}ms');
@@ -738,7 +592,6 @@ class VPNService {
           successRate: serverCache[uri]!.successRate,
         );
       } else {
-        // Soft-fail: record failure but don't remove
         final existing = serverCache[uri];
         if (existing != null) {
           serverCache[uri] = ServerCache(
@@ -749,14 +602,12 @@ class VPNService {
             lastTested: DateTime.now(),
             successCount: existing.successCount,
             failureCount: existing.failureCount + 1,
-            lastConnected: existing.lastConnected,
           );
           unawaited(_saveCache());
         }
       }
       return null;
     } catch (e) {
-      debugPrint('❌ Test error: $e');
       return null;
     }
   }
