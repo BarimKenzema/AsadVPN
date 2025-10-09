@@ -39,11 +39,11 @@ class NetworkException implements Exception {
 class VPNService {
   static final V2ray v2ray = V2ray(onStatusChanged: _updateConnectionState);
 
-  // Timeouts and concurrency knobs
-  static const Duration userTestTimeout = Duration(seconds: 4);
-  static const Duration bgVerifyTimeout = Duration(seconds: 2);
-  static const Duration tcpFastTimeout = Duration(milliseconds: 400);
-  static const int tcpFastConcurrency = 120;
+  // Timeouts and concurrency knobs - UPDATED for better ISP compatibility
+  static const Duration userTestTimeout = Duration(seconds: 6);
+  static const Duration bgVerifyTimeout = Duration(seconds: 3);
+  static const Duration tcpFastTimeout = Duration(milliseconds: 600);
+  static const int tcpFastConcurrency = 80;
 
   static bool isConnected = false;
   static bool isSubscriptionValid = false;
@@ -498,7 +498,7 @@ class VPNService {
       );
       debugPrint('✅ TCP prefilter survivors: ${tcpOk.length}');
 
-      // Stage B: Verify survivors sequentially (2s) until 11 servers
+      // Stage B: Verify survivors sequentially (3s) until 11 servers
       for (int i = 0; i < tcpOk.length; i++) {
         if ((resumeFromIndex + i) % 5 == 0) {
           _lastScannedIndex = resumeFromIndex + i;
@@ -559,7 +559,8 @@ class VPNService {
       }
     });
   }
-    // ========================= LOAD / SAVE =========================
+
+  // ========================= LOAD / SAVE =========================
   static Future<void> _loadCache() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -884,7 +885,7 @@ class VPNService {
       }
     }
 
-    // Step 1: Scan new servers (newest + shuffled), 4s test
+    // Step 1: Scan new servers (newest + shuffled), 6s test
     debugPrint('🔵 Scanning for new servers (starting from newest + shuffled)...');
     final prioritized = _prioritizeServers();
     int tested = 0;
@@ -974,31 +975,56 @@ class VPNService {
     await _savePersistentLists();
   }
 
-  // ========================= TESTS =========================
-  static String _ensureDnsAndIPv4(String config) {
+  // ========================= DNS & CONFIG - UPDATED FOR ISP COMPATIBILITY =========================
+  static String _ensureDnsAndIPv4(String config, {bool useDoH = false}) {
     try {
       final Map<String, dynamic> json = jsonDecode(config);
+      
       json['dns'] ??= {};
-      json['dns']['servers'] = [
-        'https://1.1.1.1/dns-query',
-        'https://dns.google/dns-query',
-        '1.1.1.1',
-        '8.8.8.8',
-      ];
+      
+      // Use direct DNS by default for better ISP compatibility
+      if (useDoH) {
+        // DoH mode - some ISPs may block this
+        json['dns']['servers'] = [
+          'https://1.1.1.1/dns-query',
+          'https://dns.google/dns-query',
+          '1.1.1.1',
+          '8.8.8.8',
+          '8.8.4.4',
+          'localhost', // System DNS fallback
+        ];
+      } else {
+        // Direct DNS mode - better compatibility
+        json['dns']['servers'] = [
+          '1.1.1.1',
+          '8.8.8.8',
+          '8.8.4.4',
+          '9.9.9.9', // Quad9
+          'localhost', // System DNS
+        ];
+      }
+      
       json['routing'] ??= {};
-      json['routing']['domainStrategy'] = 'UseIPv4';
+      // IPIfNonMatch is more compatible than UseIPv4
+      json['routing']['domainStrategy'] = 'IPIfNonMatch';
+      
+      // Add bypass for local addresses
+      json['routing']['rules'] ??= [];
+      
       return jsonEncode(json);
     } catch (_) {
       return config;
     }
   }
 
+  // ========================= TESTS - UPDATED =========================
   static Future<ServerInfo?> _testServerWithPing(String uri, {Duration? timeout}) async {
     try {
       final parser = V2ray.parseFromURL(uri);
       var config = parser.getFullConfiguration();
 
-      config = _ensureDnsAndIPv4(config);
+      // Use direct DNS for testing (more compatible)
+      config = _ensureDnsAndIPv4(config, useDoH: false);
 
       final effectiveTimeout = timeout ?? userTestTimeout;
       final delay = await v2ray.getServerDelay(config: config).timeout(
@@ -1006,7 +1032,8 @@ class VPNService {
         onTimeout: () => -1,
       );
 
-      if (delay != -1 && delay < 5000) {
+      // Increased threshold to 8000ms for slower ISPs
+      if (delay != -1 && delay < 8000) {
         debugPrint('✅ ${parser.remark}: ${delay}ms');
 
         final existing = serverCache[uri];
@@ -1173,8 +1200,9 @@ class VPNService {
     if (uri.startsWith('ss://')) return 'SS';
     return 'UNKNOWN';
   }
-  // ========================= CONNECT / DISCONNECT =========================
-  static Future<bool> connect({required String vlessUri, int? ping}) async {
+
+  // ========================= CONNECT / DISCONNECT - UPDATED WITH DOH FALLBACK =========================
+  static Future<bool> connect({required String vlessUri, int? ping, bool retryWithoutDoH = true}) async {
     if (kIsWeb || !Platform.isAndroid) return false;
 
     if (isSubscriptionExpired) {
@@ -1192,50 +1220,103 @@ class VPNService {
       _isManualDisconnect = false;
 
       final parser = V2ray.parseFromURL(vlessUri);
-      final config = parser.getFullConfiguration();
+      var config = parser.getFullConfiguration();
+      
+      // Try with direct DNS first (better ISP compatibility)
+      config = _ensureDnsAndIPv4(config, useDoH: false);
 
       if (await v2ray.requestPermission()) {
-        await v2ray.startV2Ray(
-          remark: parser.remark,
-          config: config,
-          proxyOnly: false,
-          bypassSubnets: [],
-        );
-
-        currentConnectedConfig = vlessUri;
-        currentConnectedPing = ping;
-
-        final existing = serverCache[vlessUri];
-        if (existing != null) {
-          serverCache[vlessUri] = ServerCache(
-            config: vlessUri,
-            name: existing.name,
-            protocol: existing.protocol,
-            lastPing: existing.lastPing,
-            lastTested: existing.lastTested,
-            successCount: existing.successCount + 1,
-            failureCount: existing.failureCount,
-            lastConnected: DateTime.now(),
+        try {
+          await v2ray.startV2Ray(
+            remark: parser.remark,
+            config: config,
+            proxyOnly: false,
+            bypassSubnets: [],
           );
-        } else {
-          serverCache[vlessUri] = ServerCache(
-            config: vlessUri,
-            name: parser.remark,
-            protocol: _getProtocol(vlessUri),
-            lastPing: ping ?? -1,
-            lastTested: DateTime.now(),
-            successCount: 1,
-            lastConnected: DateTime.now(),
-          );
+
+          // Wait to verify connection works
+          await Future.delayed(const Duration(seconds: 2));
+          
+          final delay = await v2ray.getConnectedServerDelay()
+              .timeout(const Duration(seconds: 5));
+          
+          if (delay == -1 || delay > 8000) {
+            throw Exception('Connection timeout or unhealthy');
+          }
+
+          currentConnectedConfig = vlessUri;
+          currentConnectedPing = ping;
+
+          final existing = serverCache[vlessUri];
+          if (existing != null) {
+            serverCache[vlessUri] = ServerCache(
+              config: vlessUri,
+              name: existing.name,
+              protocol: existing.protocol,
+              lastPing: existing.lastPing,
+              lastTested: existing.lastTested,
+              successCount: existing.successCount + 1,
+              failureCount: existing.failureCount,
+              lastConnected: DateTime.now(),
+            );
+          } else {
+            serverCache[vlessUri] = ServerCache(
+              config: vlessUri,
+              name: parser.remark,
+              protocol: _getProtocol(vlessUri),
+              lastPing: ping ?? -1,
+              lastTested: DateTime.now(),
+              successCount: 1,
+              lastConnected: DateTime.now(),
+            );
+          }
+
+          lastGoodServer = vlessUri;
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('last_good_server', vlessUri);
+          unawaited(_saveCache());
+
+          debugPrint('✅ Connected successfully (Direct DNS)');
+          return true;
+          
+        } catch (e) {
+          debugPrint('⚠️ Direct DNS connection failed: $e');
+          
+          // Try with DoH if direct DNS failed and retry enabled
+          if (retryWithoutDoH) {
+            debugPrint('🔄 Retrying with DoH...');
+            await v2ray.stopV2Ray();
+            await Future.delayed(const Duration(milliseconds: 500));
+            
+            config = parser.getFullConfiguration();
+            config = _ensureDnsAndIPv4(config, useDoH: true);
+            
+            await v2ray.startV2Ray(
+              remark: parser.remark,
+              config: config,
+              proxyOnly: false,
+              bypassSubnets: [],
+            );
+
+            await Future.delayed(const Duration(seconds: 2));
+            final delay = await v2ray.getConnectedServerDelay()
+                .timeout(const Duration(seconds: 5));
+            
+            if (delay != -1 && delay < 8000) {
+              currentConnectedConfig = vlessUri;
+              currentConnectedPing = ping;
+              
+              lastGoodServer = vlessUri;
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setString('last_good_server', vlessUri);
+              
+              debugPrint('✅ Connected successfully (DoH fallback)');
+              return true;
+            }
+          }
+          
+          throw e;
         }
-
-        lastGoodServer = vlessUri;
-        final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('last_good_server', vlessUri);
-        unawaited(_saveCache());
-
-        debugPrint('✅ Connected successfully');
-        return true;
       }
       return false;
     } catch (e) {
@@ -1343,4 +1424,3 @@ class VPNService {
 
 // Helper to ignore unawaited futures
 void unawaited(Future<void> future) {}
-    
