@@ -76,12 +76,17 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
   StreamSubscription? statusSub;
   StreamSubscription? progressSub;
   StreamSubscription? subscriptionExpiredSub;
+  StreamSubscription? networkChangeSub;
   
   int downloadSpeed = 0;
   int uploadSpeed = 0;
   int totalDownload = 0;
   int totalUpload = 0;
   String scanStatus = '';
+  
+  // Network info
+  String currentNetworkName = 'Detecting...';
+  bool showNetworkChangeNotification = false;
 
   @override
   void initState() {
@@ -171,6 +176,43 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
         });
       }
     });
+
+    // NEW: Listen for network changes
+    networkChangeSub = VPNService.networkChangeController.stream.listen((networkName) {
+      if (mounted) {
+        setState(() {
+          currentNetworkName = networkName;
+          showNetworkChangeNotification = true;
+        });
+        
+        // Show snackbar for network change
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.network_check, color: Colors.white),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text('Network changed to: $networkName'),
+                ),
+              ],
+            ),
+            backgroundColor: Colors.blue,
+            duration: const Duration(seconds: 3),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        
+        // Hide notification after 3 seconds
+        Future.delayed(const Duration(seconds: 3), () {
+          if (mounted) {
+            setState(() {
+              showNetworkChangeNotification = false;
+            });
+          }
+        });
+      }
+    });
   }
 
   @override
@@ -181,6 +223,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
     statusSub?.cancel();
     progressSub?.cancel();
     subscriptionExpiredSub?.cancel();
+    networkChangeSub?.cancel();
     super.dispose();
   }
 
@@ -208,6 +251,9 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
   void _updateConnectionStatus() {
     final l10n = AppLocalizations.of(context);
     setState(() {
+      // Update network name
+      currentNetworkName = VPNService.currentNetworkName ?? 'Unknown';
+      
       if (VPNService.isConnected) {
         status = l10n?.connected ?? 'Connected';
         if (VPNService.currentConnectedPing != null) {
@@ -222,6 +268,11 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
   Future<void> _initialize() async {
     await VPNService.init();
     if (!mounted) return;
+    
+    // Update network name after init
+    setState(() {
+      currentNetworkName = VPNService.currentNetworkName ?? 'Detecting...';
+    });
     
     if (VPNService.currentSubscriptionLink == null || VPNService.currentSubscriptionLink!.isEmpty) {
       _showSubscriptionDialog();
@@ -412,7 +463,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
     return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
   }
 
-  @override
+  // ====== END OF PART 1 ======  @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final isDark = Theme.of(context).brightness == Brightness.dark;
@@ -422,6 +473,43 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Network indicator
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: VPNService.isConnected ? Colors.green.withOpacity(0.2) : Colors.grey.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: VPNService.isConnected ? Colors.green : Colors.grey,
+                  width: 1,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    _getNetworkIcon(),
+                    size: 14,
+                    color: VPNService.isConnected ? Colors.green : Colors.grey,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    _truncateNetworkName(currentNetworkName),
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: VPNService.isConnected ? Colors.green : Colors.grey,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        centerTitle: true,
         actions: [
           PopupMenuButton<Locale>(
             icon: const Icon(Icons.language),
@@ -456,6 +544,34 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
       ),
       body: Column(
         children: [
+          // Network change notification banner
+          if (showNetworkChangeNotification)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              color: Colors.blue.withOpacity(0.15),
+              child: Row(
+                children: [
+                  const Icon(Icons.network_check, color: Colors.blue, size: 20),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'Network changed to: $currentNetworkName',
+                      style: const TextStyle(color: Colors.blue, fontSize: 13),
+                    ),
+                  ),
+                  const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.blue),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          
           Expanded(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -694,7 +810,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                         const SizedBox(width: 12),
                         Expanded(
                           child: Text(
-                            'Finding servers... ${VPNService.fastestServers.length}/11',
+                            'Finding servers for $currentNetworkName... ${VPNService.fastestServers.length}/11',
                             style: TextStyle(color: Colors.blue, fontSize: 12),
                           ),
                         ),
@@ -710,13 +826,26 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(
-                        l10n?.serverList ?? 'Server List',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: isDark ? Colors.white : Colors.black87,
-                        ),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            l10n?.serverList ?? 'Server List',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                              color: isDark ? Colors.white : Colors.black87,
+                            ),
+                          ),
+                          if (displayServers.isNotEmpty)
+                            Text(
+                              '$currentNetworkName • ${displayServers.length} servers',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.grey[600],
+                              ),
+                            ),
+                        ],
                       ),
                       if (VPNService.isScanning)
                         Row(
@@ -746,7 +875,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                             VPNService.isSubscriptionExpired
                                 ? 'Subscription expired'
                                 : (VPNService.isScanning
-                                    ? 'Finding servers...'
+                                    ? 'Finding servers for $currentNetworkName...'
                                     : (l10n?.noServers ?? 'Tap Connect to scan servers')),
                             style: TextStyle(
                               color: VPNService.isSubscriptionExpired ? Colors.red : Colors.grey,
@@ -795,7 +924,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                                 ),
                                 subtitle: server.successRate > 0
                                     ? Text(
-                                        'Success: ${(server.successRate * 100).toStringAsFixed(0)}%',
+                                        'Success: ${(server.successRate * 100).toStringAsFixed(0)}% on $currentNetworkName',
                                         style: TextStyle(
                                           fontSize: 11,
                                           color: server.successRate > 0.7 ? Colors.green : Colors.orange,
@@ -836,6 +965,24 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
         ],
       ),
     );
+  }
+
+  IconData _getNetworkIcon() {
+    if (currentNetworkName.toLowerCase().contains('wifi') || 
+        currentNetworkName.toLowerCase().contains('wi-fi')) {
+      return Icons.wifi;
+    } else if (currentNetworkName.toLowerCase().contains('mobile') ||
+               currentNetworkName.toLowerCase().contains('cellular')) {
+      return Icons.signal_cellular_alt;
+    }
+    return Icons.network_check;
+  }
+
+  String _truncateNetworkName(String name) {
+    if (name.length > 15) {
+      return '${name.substring(0, 12)}...';
+    }
+    return name;
   }
 
   Color _getProtocolColor(String protocol) {
