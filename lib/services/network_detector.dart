@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:convert';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/services.dart';
+import 'package:crypto/crypto.dart';
 
 class NetworkInfo {
   final String id;
@@ -49,15 +51,15 @@ class NetworkDetector {
         );
       } else {
         return NetworkInfo(
-          id: 'unknown',
+          id: 'none',
           displayName: 'No Connection',
-          type: 'unknown',
+          type: 'none',
         );
       }
     } catch (e) {
       print('❌ Network detection error: $e');
       return NetworkInfo(
-        id: 'error',
+        id: 'unknown',
         displayName: 'Unknown Network',
         type: 'unknown',
       );
@@ -67,33 +69,39 @@ class NetworkDetector {
   static Future<NetworkInfo> _getWiFiInfo() async {
     try {
       if (Platform.isAndroid) {
-        // Try to get WiFi SSID using platform channel
+        // Try to get WiFi network identifier without SSID (no location permission needed)
         try {
-          final String? ssid = await _channel.invokeMethod('getWiFiSSID');
-          if (ssid != null && ssid.isNotEmpty && ssid != '<unknown ssid>') {
-            // Clean up SSID (remove quotes if present)
-            final cleanSSID = ssid.replaceAll('"', '');
+          final String? networkId = await _channel.invokeMethod('getWiFiNetworkId');
+          if (networkId != null && networkId.isNotEmpty && networkId != 'unknown') {
+            // Create a hash of the network ID
+            final hash = _generateHash(networkId);
+            final shortHash = hash.substring(0, 6); // First 6 characters
+            
             return NetworkInfo(
-              id: 'wifi_$cleanSSID',
-              displayName: 'WiFi: $cleanSSID',
+              id: 'wifi_$hash',
+              displayName: 'WiFi ($shortHash)',
               type: 'wifi',
             );
           }
         } catch (e) {
-          print('⚠️ Could not get WiFi SSID: $e');
+          print('⚠️ Could not get WiFi network ID: $e');
         }
       }
       
-      // Fallback: generic WiFi
+      // Fallback: generic WiFi with timestamp-based ID
+      final timestamp = DateTime.now().millisecondsSinceEpoch.toString();
+      final hash = _generateHash(timestamp);
+      final shortHash = hash.substring(0, 6);
+      
       return NetworkInfo(
-        id: 'wifi_unknown_${DateTime.now().millisecondsSinceEpoch}',
-        displayName: 'WiFi Network',
+        id: 'wifi_$hash',
+        displayName: 'WiFi ($shortHash)',
         type: 'wifi',
       );
     } catch (e) {
       return NetworkInfo(
         id: 'wifi_error',
-        displayName: 'WiFi',
+        displayName: 'WiFi Network',
         type: 'wifi',
       );
     }
@@ -126,10 +134,16 @@ class NetworkDetector {
     } catch (e) {
       return NetworkInfo(
         id: 'mobile_error',
-        displayName: 'Mobile',
+        displayName: 'Mobile Data',
         type: 'mobile',
       );
     }
+  }
+
+  static String _generateHash(String input) {
+    final bytes = utf8.encode(input);
+    final digest = md5.convert(bytes);
+    return digest.toString();
   }
 
   static void dispose() {
