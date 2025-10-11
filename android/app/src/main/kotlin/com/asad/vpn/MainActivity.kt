@@ -135,9 +135,9 @@ class MainActivity: FlutterActivity() {
             val telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
             
             // NEW: Get carrier from ACTIVE DATA SUBSCRIPTION
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
                 try {
-                    val subscriptionManager = getSystemService(Context.SUBSCRIPTION_SERVICE) as SubscriptionManager
+                    val subscriptionManager = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
                     
                     // Get default data subscription ID
                     val dataSubId = SubscriptionManager.getDefaultDataSubscriptionId()
