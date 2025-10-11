@@ -85,6 +85,16 @@ class NetworkDetector {
           print('📥 [NetworkDetector] Received from native: "$networkId"');
           
           if (networkId != null && networkId.isNotEmpty && networkId != 'unknown') {
+            // Check if it's the generic fallback
+            if (networkId == 'wifi_generic') {
+              print('⚠️ [NetworkDetector] Using stable generic WiFi identifier');
+              return NetworkInfo(
+                id: 'wifi_generic',
+                displayName: 'WiFi Network',
+                type: 'wifi',
+              );
+            }
+            
             // Create a hash of the network ID (BSSID, network ID, etc.)
             final hash = _generateHash(networkId);
             final shortHash = hash.substring(0, 6);
@@ -109,11 +119,11 @@ class NetworkDetector {
         print('⚠️ [NetworkDetector] Not Android platform');
       }
       
-      // FALLBACK: Use a stable generic identifier
+      // FALLBACK: Use stable generic identifier
       print('⚠️ [NetworkDetector] Using FALLBACK: wifi_generic');
       
       return NetworkInfo(
-        id: 'wifi_generic',  // STABLE ID - same every time
+        id: 'wifi_generic',
         displayName: 'WiFi Network',
         type: 'wifi',
       );
