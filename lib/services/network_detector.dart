@@ -69,38 +69,42 @@ class NetworkDetector {
   static Future<NetworkInfo> _getWiFiInfo() async {
     try {
       if (Platform.isAndroid) {
-        // Try to get WiFi network identifier without SSID (no location permission needed)
+        // Try to get WiFi network identifier from native code
         try {
           final String? networkId = await _channel.invokeMethod('getWiFiNetworkId');
           if (networkId != null && networkId.isNotEmpty && networkId != 'unknown') {
-            // Create a hash of the network ID
+            // Create a hash of the network ID (BSSID, network ID, etc.)
             final hash = _generateHash(networkId);
-            final shortHash = hash.substring(0, 6); // First 6 characters
+            final shortHash = hash.substring(0, 6);
+            
+            print('✅ WiFi identifier: $networkId → hash: $shortHash');
             
             return NetworkInfo(
               id: 'wifi_$hash',
               displayName: 'WiFi ($shortHash)',
               type: 'wifi',
             );
+          } else {
+            print('⚠️ WiFi networkId is null or unknown');
           }
         } catch (e) {
-          print('⚠️ Could not get WiFi network ID: $e');
+          print('❌ Could not get WiFi network ID: $e');
         }
       }
       
-      // Fallback: generic WiFi with timestamp-based ID
-      final timestamp = DateTime.now().millisecondsSinceEpoch.toString();
-      final hash = _generateHash(timestamp);
-      final shortHash = hash.substring(0, 6);
+      // FALLBACK: Use a stable generic identifier
+      // Instead of timestamp, use a stable ID that persists
+      print('⚠️ Using generic WiFi identifier (cannot distinguish between networks)');
       
       return NetworkInfo(
-        id: 'wifi_$hash',
-        displayName: 'WiFi ($shortHash)',
+        id: 'wifi_generic',  // STABLE ID - same every time
+        displayName: 'WiFi Network',
         type: 'wifi',
       );
     } catch (e) {
+      print('❌ WiFi info error: $e');
       return NetworkInfo(
-        id: 'wifi_error',
+        id: 'wifi_generic',
         displayName: 'WiFi Network',
         type: 'wifi',
       );
