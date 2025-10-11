@@ -177,7 +177,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
       }
     });
 
-    // NEW: Listen for network changes
+    // Listen for network changes
     networkChangeSub = VPNService.networkChangeController.stream.listen((networkName) {
       if (mounted) {
         setState(() {
@@ -235,12 +235,12 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
       debugPrint('📱 App resumed from background');
       _updateConnectionStatus();
       
-      // Resume auto-scan when app comes back
+      // Resume auto-scan when app comes back - CORRECTED
       if (!VPNService.isConnected && 
-          VPNService.fastestServers.length < 11 &&
+          VPNService.fastestServers.length < VPNService.MAX_DISPLAY_SERVERS &&
           VPNService.currentSubscriptionLink != null &&
           !VPNService.isScanning) {
-        debugPrint('🔵 Resuming auto-scan (${VPNService.fastestServers.length}/11 servers)...');
+        debugPrint('🔵 Resuming auto-scan (${VPNService.fastestServers.length}/${VPNService.MAX_DISPLAY_SERVERS} servers)...');
         VPNService.resumeAutoScan();
       }
     } else if (state == AppLifecycleState.paused) {
@@ -463,7 +463,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
     return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
   }
 
-  // ====== END OF PART 1 ======  @override
+  @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final isDark = Theme.of(context).brightness == Brightness.dark;
@@ -789,9 +789,9 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
             ),
             child: Column(
               children: [
-                // Scanning progress indicator
+                // Scanning progress indicator - CORRECTED
                 if (!VPNService.isConnected && 
-                    VPNService.fastestServers.length < 11 && 
+                    VPNService.fastestServers.length < VPNService.MAX_DISPLAY_SERVERS && 
                     VPNService.currentSubscriptionLink != null &&
                     !VPNService.isSubscriptionExpired)
                   Container(
@@ -810,7 +810,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                         const SizedBox(width: 12),
                         Expanded(
                           child: Text(
-                            'Finding servers for $currentNetworkName... ${VPNService.fastestServers.length}/11',
+                            'Finding servers for $currentNetworkName... ${VPNService.fastestServers.length}/${VPNService.MAX_DISPLAY_SERVERS}',
                             style: TextStyle(color: Colors.blue, fontSize: 12),
                           ),
                         ),
