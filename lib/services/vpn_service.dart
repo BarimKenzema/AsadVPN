@@ -41,11 +41,14 @@ class NetworkException implements Exception {
 class VPNService {
   static final V2ray v2ray = V2ray(onStatusChanged: _updateConnectionState);
 
-  // Timeouts and concurrency knobs - UPDATED: 3s user, 2s background
+  // Timeouts and concurrency knobs
   static const Duration userTestTimeout = Duration(seconds: 3);
   static const Duration bgVerifyTimeout = Duration(seconds: 2);
   static const Duration tcpFastTimeout = Duration(milliseconds: 600);
   static const int tcpFastConcurrency = 80;
+  
+  // SERVER LIMITS - ENFORCED!
+  static const int MAX_DISPLAY_SERVERS = 11;  // Hard limit for display
 
   static bool isConnected = false;
   static bool isSubscriptionValid = false;
@@ -65,7 +68,7 @@ class VPNService {
   static Map<String, NetworkProfile> networkProfiles = {};
   static StreamSubscription? _networkSubscription;
 
-  // NEW: VPN state change tracking
+  // VPN state change tracking
   static bool _isVpnStateChanging = false;
   static Timer? _networkChangeDebounceTimer;
 
@@ -112,6 +115,16 @@ class VPNService {
   static final StreamController<String> networkChangeController =
       StreamController<String>.broadcast();
 
+  // ========================= HELPER: ENFORCE SERVER LIMIT =========================
+  static void _enforceServerLimit() {
+    if (fastestServers.length > MAX_DISPLAY_SERVERS) {
+      debugPrint('⚠️ Server limit exceeded: ${fastestServers.length} > $MAX_DISPLAY_SERVERS, trimming...');
+      fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+      fastestServers = fastestServers.take(MAX_DISPLAY_SERVERS).toList();
+      debugPrint('✅ Trimmed to $MAX_DISPLAY_SERVERS servers');
+    }
+  }
+
   // ========================= STATUS =========================
   static void _updateConnectionState(V2RayStatus status) {
     final newIsConnected = status.state == 'CONNECTED';
@@ -155,7 +168,7 @@ class VPNService {
     });
   }
 
-  // ========================= NETWORK DETECTION & SWITCHING =========================
+  // ====== END OF PART 1 ======  // ========================= NETWORK DETECTION & SWITCHING =========================
   static Future<void> _initNetworkDetection() async {
     try {
       // Get initial network
@@ -244,7 +257,7 @@ class VPNService {
       }
       
       _isVpnStateChanging = false;
-    } else if (!isConnected && fastestServers.length < 11) {
+    } else if (!isConnected && fastestServers.length < MAX_DISPLAY_SERVERS) {
       // Start auto-scan for new network
       debugPrint('🔍 Starting auto-scan for new network...');
       unawaited(_autoScanServers());
@@ -288,6 +301,9 @@ class VPNService {
             .whereType<ServerInfo>()
             .toList();
         
+        // ENFORCE LIMIT after loading
+        _enforceServerLimit();
+        
         serversStreamController.add(List.from(fastestServers));
       } else {
         debugPrint('📝 New network detected: $currentNetworkName - creating profile...');
@@ -316,6 +332,9 @@ class VPNService {
     if (currentNetworkId == null || currentNetworkId == 'none') return;
 
     try {
+      // ENFORCE LIMIT before saving
+      _enforceServerLimit();
+      
       // Update current profile
       final currentConfigs = fastestServers.map((s) => s.config).toList();
       
@@ -386,7 +405,7 @@ class VPNService {
     }
 
     if (!isConnected &&
-        fastestServers.length < 11 &&
+        fastestServers.length < MAX_DISPLAY_SERVERS &&
         currentSubscriptionLink != null &&
         !_isBackgroundScanning &&
         !isSubscriptionExpired) {
@@ -422,13 +441,13 @@ class VPNService {
       // Start hourly subscription refresh timer
       _startSubscriptionRefresh();
 
-      // Auto discovery when not connected and fewer than 11 in display
+      // Auto discovery when not connected and fewer than MAX servers in display
       if (currentSubscriptionLink != null &&
           currentSubscriptionLink!.isNotEmpty &&
           !isConnected &&
-          fastestServers.length < 11 &&
+          fastestServers.length < MAX_DISPLAY_SERVERS &&
           currentNetworkId != 'none') {
-        debugPrint('🔵 Starting auto-scan for 11 servers (from index $_lastScannedIndex)...');
+        debugPrint('🔵 Starting auto-scan for $MAX_DISPLAY_SERVERS servers (from index $_lastScannedIndex)...');
         unawaited(_autoScanServers(resumeFromIndex: _lastScannedIndex));
       }
 
@@ -438,7 +457,7 @@ class VPNService {
     }
   }
 
-  // ====== END OF PART 1 ======  // ========================= SUBSCRIPTION REFRESH =========================
+  // ========================= SUBSCRIPTION REFRESH =========================
   static void _startSubscriptionRefresh() {
     _subscriptionRefreshTimer?.cancel();
     
@@ -497,7 +516,7 @@ class VPNService {
         _priorityNew.addAll(newlyAdded);
 
         // Quick verify pass for newly-added servers (if not connected and app active)
-        if (!isConnected && !_isBackgroundScanning) {
+        if (!isConnected && !_isBackgroundScanning && fastestServers.length < MAX_DISPLAY_SERVERS) {
           debugPrint('🔍 Quick verify pass for ${newlyAdded.length} new servers...');
           unawaited(_verifyNewServers(newlyAdded.toList()));
         }
@@ -567,13 +586,14 @@ class VPNService {
       // Verify survivors (limit to 5 to avoid blocking too long)
       final toVerify = tcpOk.take(5).toList();
       for (final config in toVerify) {
-        if (isConnected || fastestServers.length >= 11) break;
+        if (isConnected || fastestServers.length >= MAX_DISPLAY_SERVERS) break;
 
         final result = await _testServerWithPing(config, timeout: bgVerifyTimeout);
-        if (result != null && !isConnected) {
+        if (result != null && !isConnected && fastestServers.length < MAX_DISPLAY_SERVERS) {
           if (!fastestServers.any((s) => s.config == result.config)) {
             fastestServers.add(result);
             fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+            _enforceServerLimit();  // ENFORCE LIMIT
             await _saveCurrentNetworkProfile();
             serversStreamController.add(List.from(fastestServers));
             debugPrint('✅ New server verified and added: ${result.name}');
@@ -674,7 +694,7 @@ class VPNService {
 
       final startMsg =
           resumeFromIndex > 0 ? 'resuming from index $resumeFromIndex' : 'starting fresh';
-      debugPrint('🔵 Auto-scan on $currentNetworkName: Finding 11 servers ($startMsg)...');
+      debugPrint('🔵 Auto-scan on $currentNetworkName: Finding $MAX_DISPLAY_SERVERS servers ($startMsg)...');
 
       final prioritized = _prioritizeServers();
 
@@ -689,25 +709,27 @@ class VPNService {
       );
       debugPrint('✅ TCP prefilter survivors: ${tcpOk.length}');
 
-      // Stage B: Verify survivors sequentially (2s) until 11 servers
+      // Stage B: Verify survivors sequentially (2s) until MAX_DISPLAY_SERVERS
       for (int i = 0; i < tcpOk.length; i++) {
         if ((resumeFromIndex + i) % 5 == 0) {
           _lastScannedIndex = resumeFromIndex + i;
           await _saveProgress();
         }
 
-        if (fastestServers.length >= 11 || isConnected || _cancelAutoScan) {
+        if (fastestServers.length >= MAX_DISPLAY_SERVERS || isConnected || _cancelAutoScan) {
           if (isConnected) debugPrint('🛑 Auto-scan stopped: User connected');
           if (_cancelAutoScan) debugPrint('🛑 Auto-scan cancelled');
+          if (fastestServers.length >= MAX_DISPLAY_SERVERS) debugPrint('✅ Reached $MAX_DISPLAY_SERVERS servers limit');
           break;
         }
 
         final config = tcpOk[i];
         final result = await _testServerWithPing(config, timeout: bgVerifyTimeout);
-        if (result != null && !isConnected) {
+        if (result != null && !isConnected && fastestServers.length < MAX_DISPLAY_SERVERS) {
           if (!fastestServers.any((s) => s.config == result.config)) {
             fastestServers.add(result);
             fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+            _enforceServerLimit();  // ENFORCE LIMIT
             await _saveCurrentNetworkProfile();
             serversStreamController.add(List.from(fastestServers));
           }
@@ -924,7 +946,10 @@ class VPNService {
     }
   }
 
-  // ========================= CONNECT FLOW =========================
+  // ========================= REST OF FILE - Continue in next reply =========================
+  
+  // I'll send the remaining sections (CONNECT FLOW, TESTS, CONNECT/DISCONNECT) in the next message
+  // to avoid exceeding message limits. Reply "Continue vpn_service.dart" for the rest.  // ========================= CONNECT FLOW =========================
   static Future<Map<String, dynamic>> scanAndSelectBestServer({bool connectImmediately = true}) async {
     if (isSubscriptionExpired) {
       return {'success': false, 'error': 'Subscription expired. Please purchase a new subscription.'};
@@ -983,6 +1008,7 @@ class VPNService {
             if (index != -1) {
               fastestServers[index] = result;
               fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+              _enforceServerLimit();  // ENFORCE LIMIT
               serversStreamController.add(List.from(fastestServers));
             }
             await _saveCurrentNetworkProfile();
@@ -1013,7 +1039,7 @@ class VPNService {
       final fallback = _getKnownGoodForNetwork(currentNetworkId!);
       if (fallback.isNotEmpty) {
         debugPrint('🔵 Fallback: testing known-good pool for $currentNetworkName (${fallback.length})...');
-        for (int i = 0; i < min(11, fallback.length) && !_cancelScan && !isConnected; i++) {
+        for (int i = 0; i < min(MAX_DISPLAY_SERVERS, fallback.length) && !_cancelScan && !isConnected; i++) {
           final cfg = fallback[i];
           final result =
               await _testServerWithPing(cfg, timeout: userTestTimeout).timeout(userTestTimeout, onTimeout: () => null);
@@ -1022,6 +1048,7 @@ class VPNService {
             if (!fastestServers.any((s) => s.config == result.config)) {
               fastestServers.add(result);
               fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+              _enforceServerLimit();  // ENFORCE LIMIT
               serversStreamController.add(List.from(fastestServers));
             }
             await _saveCurrentNetworkProfile();
@@ -1050,6 +1077,7 @@ class VPNService {
           if (!fastestServers.any((s) => s.config == result.config)) {
             fastestServers.add(result);
             fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+            _enforceServerLimit();  // ENFORCE LIMIT
             serversStreamController.add(List.from(fastestServers));
           }
           await _saveCurrentNetworkProfile();
@@ -1599,7 +1627,7 @@ class VPNService {
       // Save current network profile before potential auto-scan
       await _saveCurrentNetworkProfile();
 
-      if (fastestServers.length < 11 && 
+      if (fastestServers.length < MAX_DISPLAY_SERVERS && 
           currentSubscriptionLink != null && 
           !isSubscriptionExpired &&
           currentNetworkId != 'none') {
