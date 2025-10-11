@@ -3,6 +3,7 @@ package com.asad.vpn
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.telephony.TelephonyManager
@@ -21,9 +22,9 @@ class MainActivity: FlutterActivity() {
         
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
-                "getWiFiSSID" -> {
-                    val ssid = getWiFiSSID()
-                    result.success(ssid)
+                "getWiFiNetworkId" -> {
+                    val networkId = getWiFiNetworkId()
+                    result.success(networkId)
                 }
                 "getCarrierName" -> {
                     val carrier = getCarrierName()
@@ -36,38 +37,27 @@ class MainActivity: FlutterActivity() {
         }
     }
 
-    private fun getWiFiSSID(): String? {
+    private fun getWiFiNetworkId(): String? {
         try {
-            // Request permission if needed
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
-                    != PackageManager.PERMISSION_GRANTED) {
-                    ActivityCompat.requestPermissions(
-                        this,
-                        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION),
-                        PERMISSION_REQUEST_CODE
-                    )
-                    return null
-                }
-            }
-
+            // Get WiFi network identifier WITHOUT needing location permission
+            // Uses network ID which doesn't expose SSID
             val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            val wifiInfo = wifiManager.connectionInfo
+            val wifiInfo: WifiInfo? = wifiManager.connectionInfo
             
             if (wifiInfo != null) {
-                var ssid = wifiInfo.ssid
+                // Get network ID (doesn't require location permission)
+                val networkId = wifiInfo.networkId
                 
-                // Remove quotes if present
-                if (ssid != null && ssid.startsWith("\"") && ssid.endsWith("\"")) {
-                    ssid = ssid.substring(1, ssid.length - 1)
+                // Get BSSID (router MAC address) - works on some Android versions without location
+                val bssid = wifiInfo.bssid
+                
+                if (bssid != null && bssid != "02:00:00:00:00:00" && bssid != "00:00:00:00:00:00") {
+                    // Use BSSID as network identifier (more reliable)
+                    return bssid
+                } else if (networkId != -1) {
+                    // Fallback to network ID
+                    return "net_$networkId"
                 }
-                
-                // Return null for unknown SSID
-                if (ssid == "<unknown ssid>" || ssid.isNullOrEmpty()) {
-                    return null
-                }
-                
-                return ssid
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -77,15 +67,11 @@ class MainActivity: FlutterActivity() {
 
     private fun getCarrierName(): String? {
         try {
-            // Request permission if needed
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            // Request permission if needed (for carrier name on Android 10+)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE)
                     != PackageManager.PERMISSION_GRANTED) {
-                    ActivityCompat.requestPermissions(
-                        this,
-                        arrayOf(Manifest.permission.READ_PHONE_STATE),
-                        PERMISSION_REQUEST_CODE
-                    )
+                    // Return null if no permission (user can still use app with generic "Mobile Data")
                     return null
                 }
             }
@@ -122,11 +108,9 @@ class MainActivity: FlutterActivity() {
         when (requestCode) {
             PERMISSION_REQUEST_CODE -> {
                 if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                    // Permission granted, you can now get WiFi SSID or carrier name
-                    println("✅ Network detection permission granted")
+                    println("✅ Phone state permission granted (carrier name available)")
                 } else {
-                    // Permission denied
-                    println("⚠️ Network detection permission denied")
+                    println("⚠️ Phone state permission denied (will show generic 'Mobile Data')")
                 }
             }
         }
