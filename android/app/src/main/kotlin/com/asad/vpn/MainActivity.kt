@@ -39,27 +39,50 @@ class MainActivity: FlutterActivity() {
 
     private fun getWiFiNetworkId(): String? {
         try {
-            // Get WiFi network identifier WITHOUT needing location permission
-            // Uses network ID which doesn't expose SSID
             val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
             val wifiInfo: WifiInfo? = wifiManager.connectionInfo
             
             if (wifiInfo != null) {
-                // Get network ID (doesn't require location permission)
-                val networkId = wifiInfo.networkId
+                // Priority 1: Try to get BSSID (router MAC address - most reliable)
+                var bssid = wifiInfo.bssid
                 
-                // Get BSSID (router MAC address) - works on some Android versions without location
-                val bssid = wifiInfo.bssid
-                
-                if (bssid != null && bssid != "02:00:00:00:00:00" && bssid != "00:00:00:00:00:00") {
-                    // Use BSSID as network identifier (more reliable)
+                if (bssid != null && 
+                    bssid.isNotEmpty() && 
+                    bssid != "02:00:00:00:00:00" && 
+                    bssid != "00:00:00:00:00:00" &&
+                    bssid != "<unknown bssid>") {
+                    
+                    // Clean BSSID (remove colons for consistent format)
+                    bssid = bssid.replace(":", "").lowercase()
+                    println("✅ WiFi BSSID: $bssid")
                     return bssid
-                } else if (networkId != -1) {
-                    // Fallback to network ID
-                    return "net_$networkId"
+                }
+                
+                // Priority 2: Network ID (less reliable but works)
+                val networkId = wifiInfo.networkId
+                if (networkId != -1) {
+                    println("⚠️ Using Network ID: $networkId (BSSID unavailable)")
+                    return "netid_$networkId"
+                }
+                
+                // Priority 3: Link speed + frequency as fallback
+                val linkSpeed = wifiInfo.linkSpeed
+                val frequency = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    wifiInfo.frequency
+                } else {
+                    0
+                }
+                
+                if (linkSpeed > 0 || frequency > 0) {
+                    val identifier = "link_${linkSpeed}_${frequency}"
+                    println("⚠️ Using link identifier: $identifier (BSSID and NetworkID unavailable)")
+                    return identifier
                 }
             }
+            
+            println("❌ Could not get any WiFi identifier")
         } catch (e: Exception) {
+            println("❌ WiFi network ID error: ${e.message}")
             e.printStackTrace()
         }
         return null
