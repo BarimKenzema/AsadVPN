@@ -9,11 +9,11 @@ import android.os.Build
 import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import android.util.Log
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.net.NetworkInterface
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "network_detector"
@@ -106,9 +106,17 @@ class MainActivity: FlutterActivity() {
                 Log.w(TAG, "⚠️ Network ID is -1 (invalid)")
             }
             
-            // Priority 3: STABLE FALLBACK - wifi_generic (NO link speed!)
-            Log.w(TAG, "⚠️ All WiFi identifiers failed, using stable generic fallback")
-            return "wifi_generic"
+            // Priority 3: Gateway IP + DNS (NEW - works without location permission)
+            Log.d(TAG, "🔍 Trying Gateway IP + DNS method...")
+            val gatewayDns = getGatewayAndDNS()
+            if (gatewayDns != null) {
+                Log.d(TAG, "✅ Using Gateway+DNS: $gatewayDns")
+                return gatewayDns
+            }
+            
+            // Priority 4: Fallback to generic (last resort)
+            Log.w(TAG, "⚠️ All WiFi identifiers failed, returning null")
+            return null
             
         } catch (e: Exception) {
             Log.e(TAG, "❌ WiFi network ID error: ${e.message}", e)
@@ -117,6 +125,70 @@ class MainActivity: FlutterActivity() {
         
         Log.e(TAG, "❌ Returning NULL for WiFi Network ID")
         return null
+    }
+
+    private fun getGatewayAndDNS(): String? {
+        try {
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            val dhcpInfo = wifiManager.dhcpInfo
+            
+            // Get Gateway IP
+            val gatewayInt = dhcpInfo.gateway
+            if (gatewayInt == 0) {
+                Log.w(TAG, "⚠️ Gateway IP is 0 (invalid)")
+                return null
+            }
+            
+            val gatewayIP = String.format(
+                "%d.%d.%d.%d",
+                gatewayInt and 0xFF,
+                gatewayInt shr 8 and 0xFF,
+                gatewayInt shr 16 and 0xFF,
+                gatewayInt shr 24 and 0xFF
+            )
+            
+            // Get DNS1
+            val dns1Int = dhcpInfo.dns1
+            val dns1IP = if (dns1Int != 0) {
+                String.format(
+                    "%d.%d.%d.%d",
+                    dns1Int and 0xFF,
+                    dns1Int shr 8 and 0xFF,
+                    dns1Int shr 16 and 0xFF,
+                    dns1Int shr 24 and 0xFF
+                )
+            } else {
+                "0.0.0.0"
+            }
+            
+            // Get DNS2
+            val dns2Int = dhcpInfo.dns2
+            val dns2IP = if (dns2Int != 0) {
+                String.format(
+                    "%d.%d.%d.%d",
+                    dns2Int and 0xFF,
+                    dns2Int shr 8 and 0xFF,
+                    dns2Int shr 16 and 0xFF,
+                    dns2Int shr 24 and 0xFF
+                )
+            } else {
+                "0.0.0.0"
+            }
+            
+            Log.d(TAG, "   Gateway: $gatewayIP")
+            Log.d(TAG, "   DNS1: $dns1IP")
+            Log.d(TAG, "   DNS2: $dns2IP")
+            
+            // Combine Gateway + DNS for unique identifier
+            val combined = "gw_${gatewayIP}_dns_${dns1IP}_${dns2IP}"
+            
+            Log.d(TAG, "✅ Gateway+DNS identifier: $combined")
+            return combined
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Gateway+DNS error: ${e.message}", e)
+            return null
+        }
     }
 
     private fun getCarrierName(): String? {
@@ -134,7 +206,7 @@ class MainActivity: FlutterActivity() {
 
             val telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
             
-            // NEW: Get carrier from ACTIVE DATA SUBSCRIPTION
+            // NEW: Get carrier from ACTIVE DATA SUBSCRIPTION + SIM SLOT
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
                 try {
                     val subscriptionManager = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
@@ -148,11 +220,16 @@ class MainActivity: FlutterActivity() {
                         
                         if (activeSubInfo != null) {
                             var carrierName = activeSubInfo.carrierName?.toString()
+                            val slotIndex = activeSubInfo.simSlotIndex
+                            
                             Log.d(TAG, "   Active Data SIM Carrier: '$carrierName'")
+                            Log.d(TAG, "   SIM Slot Index: $slotIndex")
                             
                             if (!carrierName.isNullOrEmpty()) {
-                                Log.d(TAG, "✅ Carrier (from active data SIM): $carrierName")
-                                return carrierName
+                                // Include slot index to differentiate SIMs with same carrier
+                                val result = "${carrierName}_Slot${slotIndex}"
+                                Log.d(TAG, "✅ Carrier (from active data SIM): $result")
+                                return result
                             }
                         } else {
                             Log.w(TAG, "⚠️ Active subscription info is null")
@@ -181,7 +258,7 @@ class MainActivity: FlutterActivity() {
                 return null
             }
             
-            Log.d(TAG, "✅ Carrier: $carrierName")
+            Log.d(TAG, "✅ Carrier (fallback): $carrierName")
             return carrierName
         } catch (e: Exception) {
             Log.e(TAG, "❌ Carrier error: ${e.message}", e)
