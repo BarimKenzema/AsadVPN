@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.app.ActivityCompat
@@ -105,25 +106,10 @@ class MainActivity: FlutterActivity() {
                 Log.w(TAG, "⚠️ Network ID is -1 (invalid)")
             }
             
-            // Priority 3: Link speed + frequency as fallback
-            val linkSpeed = wifiInfo.linkSpeed
-            val frequency = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                wifiInfo.frequency
-            } else {
-                0
-            }
+            // Priority 3: STABLE FALLBACK - wifi_generic (NO link speed!)
+            Log.w(TAG, "⚠️ All WiFi identifiers failed, using stable generic fallback")
+            return "wifi_generic"
             
-            Log.d(TAG, "🔍 Checking Link Speed: $linkSpeed, Frequency: $frequency")
-            
-            if (linkSpeed > 0 || frequency > 0) {
-                val identifier = "link_${linkSpeed}_${frequency}"
-                Log.d(TAG, "✅ Using link identifier: $identifier")
-                return identifier
-            } else {
-                Log.w(TAG, "⚠️ Link speed and frequency both 0 or unavailable")
-            }
-            
-            Log.e(TAG, "❌ Could not get ANY WiFi identifier!")
         } catch (e: Exception) {
             Log.e(TAG, "❌ WiFi network ID error: ${e.message}", e)
             e.printStackTrace()
@@ -137,7 +123,7 @@ class MainActivity: FlutterActivity() {
         Log.d(TAG, "🔍 Getting Carrier Name...")
         
         try {
-            // Request permission if needed (for carrier name on Android 10+)
+            // Check permission first
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE)
                     != PackageManager.PERMISSION_GRANTED) {
@@ -148,7 +134,38 @@ class MainActivity: FlutterActivity() {
 
             val telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
             
-            // Get carrier name
+            // NEW: Get carrier from ACTIVE DATA SUBSCRIPTION
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                try {
+                    val subscriptionManager = getSystemService(Context.SUBSCRIPTION_SERVICE) as SubscriptionManager
+                    
+                    // Get default data subscription ID
+                    val dataSubId = SubscriptionManager.getDefaultDataSubscriptionId()
+                    Log.d(TAG, "   Default Data Subscription ID: $dataSubId")
+                    
+                    if (dataSubId != SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+                        val activeSubInfo = subscriptionManager.getActiveSubscriptionInfo(dataSubId)
+                        
+                        if (activeSubInfo != null) {
+                            var carrierName = activeSubInfo.carrierName?.toString()
+                            Log.d(TAG, "   Active Data SIM Carrier: '$carrierName'")
+                            
+                            if (!carrierName.isNullOrEmpty()) {
+                                Log.d(TAG, "✅ Carrier (from active data SIM): $carrierName")
+                                return carrierName
+                            }
+                        } else {
+                            Log.w(TAG, "⚠️ Active subscription info is null")
+                        }
+                    } else {
+                        Log.w(TAG, "⚠️ Invalid subscription ID")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Error getting active subscription: ${e.message}")
+                }
+            }
+            
+            // FALLBACK: Try network operator (old method)
             var carrierName = telephonyManager.networkOperatorName
             Log.d(TAG, "   Network Operator: '$carrierName'")
             
