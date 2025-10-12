@@ -85,7 +85,7 @@ class NetworkDetector {
           print('📥 [NetworkDetector] Received from native: "$networkId"');
           
           if (networkId != null && networkId.isNotEmpty && networkId != 'unknown') {
-            // Create a hash of the network ID
+            // Create a hash of the network ID (includes gateway + DNS + local IP now)
             final hash = _generateHash(networkId);
             final shortHash = hash.substring(0, 8);
             
