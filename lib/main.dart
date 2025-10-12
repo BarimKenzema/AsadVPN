@@ -486,7 +486,9 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
       default:
         return Colors.grey;
     }
-  }  @override
+  }
+
+  @override
   Widget build(BuildContext context) {
     final l10n = AppLocalizations.of(context);
     final isDark = Theme.of(context).brightness == Brightness.dark;
@@ -785,8 +787,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                   ),
               ],
             ),
-          ),
-                    
+          ),                    
           Container(
             height: 250,
             decoration: BoxDecoration(
@@ -825,7 +826,9 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
                         const SizedBox(width: 12),
                         Expanded(
                           child: Text(
-                            'Finding servers for $currentNetworkName... ${VPNService.fastestServers.length}/${VPNService.MAX_DISPLAY_SERVERS}',
+                            displayServers.length >= VPNService.MAX_DISPLAY_SERVERS
+                                ? 'Optimizing servers for $currentNetworkName...'
+                                : 'Finding servers for $currentNetworkName... ${displayServers.length}/${VPNService.MAX_DISPLAY_SERVERS}',
                             style: TextStyle(color: Colors.blue, fontSize: 12),
                           ),
                         ),
