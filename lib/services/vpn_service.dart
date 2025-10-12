@@ -42,11 +42,11 @@ class VPNService {
   static final V2ray v2ray = V2ray(onStatusChanged: _updateConnectionState);
 
   // Timeouts and concurrency knobs
-  static const Duration userTestTimeout = Duration(seconds: 3);
+  static const Duration userTestTimeout = Duration(milliseconds: 1500);  // ← CHANGED to 1.5 seconds
   static const Duration wifiConnectTimeout = Duration(seconds: 6);
   static const Duration bgVerifyTimeout = Duration(seconds: 2);
   static const Duration tcpFastTimeout = Duration(milliseconds: 600);
-  static const int tcpFastConcurrency = 80;
+  static const int tcpFastConcurrency = 111;  // ← CHANGED to 111
   
   // SERVER LIMITS - ENFORCED!
   static const int MAX_DISPLAY_SERVERS = 11;  // Hard limit for display
@@ -151,10 +151,22 @@ class VPNService {
   static void _enforceServerLimit() {
     if (fastestServers.length > MAX_DISPLAY_SERVERS) {
       debugPrint('⚠️ Server limit exceeded: ${fastestServers.length} > $MAX_DISPLAY_SERVERS, trimming...');
-      fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+      _sortServersBySuccessRateAndPing();  // ← CHANGED: Sort before trimming
       fastestServers = fastestServers.take(MAX_DISPLAY_SERVERS).toList();
       debugPrint('✅ Trimmed to $MAX_DISPLAY_SERVERS servers');
     }
+  }
+
+  // ========================= HELPER: SORT SERVERS =========================
+  static void _sortServersBySuccessRateAndPing() {
+    fastestServers.sort((a, b) {
+      // First: Compare success rates (descending - higher is better)
+      final rateCompare = b.successRate.compareTo(a.successRate);
+      if (rateCompare != 0) return rateCompare;
+      
+      // If same success rate: Compare pings (ascending - lower is better)
+      return a.ping.compareTo(b.ping);
+    });
   }
 
   // ========================= STATUS =========================
@@ -320,7 +332,7 @@ class VPNService {
       if (profile != null) {
         debugPrint('✅ Loaded profile for $currentNetworkName: ${profile.topServers.length} servers');
         
-        // Restore servers from profile - FIX: Don't lose servers!
+        // Restore servers from profile
         fastestServers = profile.topServers.map((config) {
           final cached = serverCache[config];
           if (cached != null) {
@@ -333,7 +345,6 @@ class VPNService {
               lastConnected: cached.lastConnected,
             );
           } else {
-            // No cache? Create placeholder (will be re-tested)
             return ServerInfo(
               config: config,
               protocol: _getProtocol(config),
@@ -344,7 +355,8 @@ class VPNService {
           }
         }).toList();
         
-        // ENFORCE LIMIT after loading
+        // Sort and enforce limit
+        _sortServersBySuccessRateAndPing();
         _enforceServerLimit();
         
         serversStreamController.add(List.from(fastestServers));
@@ -375,7 +387,8 @@ class VPNService {
     if (currentNetworkId == null || currentNetworkId == 'none') return;
 
     try {
-      // ENFORCE LIMIT before saving
+      // Sort before saving
+      _sortServersBySuccessRateAndPing();
       _enforceServerLimit();
       
       // Update current profile
@@ -407,7 +420,7 @@ class VPNService {
     return serverCache.entries
         .where((e) => e.value.getNetworkSuccessRate(networkId) > 0.6)
         .map((e) => e.key)
-        .take(30)
+        .take(44)  // ← CHANGED from 30 to 44
         .toList();
   }
 
@@ -477,7 +490,13 @@ class VPNService {
       final prefs = await SharedPreferences.getInstance();
       currentSubscriptionLink = prefs.getString('subscription_link');
       lastGoodServer = prefs.getString('last_good_server');
-      _lastScannedIndex = prefs.getInt('last_scanned_index') ?? 0;
+      
+      // ← CHANGED: Load network-specific scan index
+      if (currentNetworkId != null && currentNetworkId != 'none') {
+        _lastScannedIndex = prefs.getInt('last_scanned_index_$currentNetworkId') ?? 0;
+      } else {
+        _lastScannedIndex = 0;
+      }
 
       debugPrint('🔵 Init complete. Network: $currentNetworkName');
 
@@ -634,7 +653,7 @@ class VPNService {
         if (result != null && !isConnected && fastestServers.length < MAX_DISPLAY_SERVERS) {
           if (!fastestServers.any((s) => s.config == result.config)) {
             fastestServers.add(result);
-            fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+            _sortServersBySuccessRateAndPing();
             _enforceServerLimit();
             await _saveCurrentNetworkProfile();
             serversStreamController.add(List.from(fastestServers));
@@ -738,6 +757,14 @@ class VPNService {
 
       final prioritized = _prioritizeServers();
 
+      // ← FIX: Check if resumeFromIndex is beyond list length
+      if (resumeFromIndex >= prioritized.length) {
+        debugPrint('🔄 Resume index ($resumeFromIndex) >= total servers (${prioritized.length}), resetting to 0');
+        resumeFromIndex = 0;
+        _lastScannedIndex = 0;
+        await _saveProgress();
+      }
+
       // UNIFIED APPROACH: Use TCP prefilter + getServerDelay for BOTH WiFi and Mobile
       debugPrint('⚡ TCP prefiltering ${prioritized.length - resumeFromIndex} servers with concurrency $tcpFastConcurrency...');
       
@@ -774,29 +801,59 @@ class VPNService {
           if (fastestServers.length < MAX_DISPLAY_SERVERS) {
             if (!fastestServers.any((s) => s.config == result.config)) {
               fastestServers.add(result);
-              fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+              _sortServersBySuccessRateAndPing();  // ← CHANGED: Sort after adding
               _enforceServerLimit();
               await _saveCurrentNetworkProfile();
               serversStreamController.add(List.from(fastestServers));
               debugPrint('✅ Added to display (${fastestServers.length}/$MAX_DISPLAY_SERVERS): ${result.name}');
             }
           } else {
-            // Try to replace slower server if this one is faster
-            if (result.ping < fastestServers.last.ping) {
+            // Try to replace slower server if this one is better
+            // ← CHANGED: Compare by success rate first, then ping
+            final lastServer = fastestServers.last;
+            final isBetter = (result.successRate > lastServer.successRate) ||
+                             (result.successRate == lastServer.successRate && result.ping < lastServer.ping);
+            
+            if (isBetter) {
               fastestServers.removeLast();
               fastestServers.add(result);
-              fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+              _sortServersBySuccessRateAndPing();
               await _saveCurrentNetworkProfile();
               serversStreamController.add(List.from(fastestServers));
-              debugPrint('✅ Replaced slower server with ${result.name} (${result.ping}ms < ${fastestServers.last.ping}ms)');
+              debugPrint('✅ Replaced slower server with ${result.name} (${(result.successRate * 100).toStringAsFixed(0)}% / ${result.ping}ms)');
             } else {
-              debugPrint('📊 Server tested but not added (slower): ${result.name} (${result.ping}ms)');
+              debugPrint('📊 Server tested but not added (not better): ${result.name} (${(result.successRate * 100).toStringAsFixed(0)}% / ${result.ping}ms)');
             }
           }
         }
       }
 
-      if (!isConnected) {
+      // ← FIX: Check if we've reached the end, and loop back if needed
+      if (!isConnected && !_cancelAutoScan) {
+        final finalIndex = resumeFromIndex + toTest.length;
+        
+        if (finalIndex >= prioritized.length) {
+          debugPrint('🔄 Reached end of server list (${finalIndex}/${prioritized.length})');
+          
+          if (fastestServers.length < MAX_DISPLAY_SERVERS) {
+            // Still need more servers, loop back to beginning
+            debugPrint('🔄 Only ${fastestServers.length}/$MAX_DISPLAY_SERVERS servers found, looping back to index 0...');
+            _lastScannedIndex = 0;
+            await _saveProgress();
+            
+            // Recursively call auto-scan from index 0
+            _isBackgroundScanning = false;
+            await Future.delayed(const Duration(milliseconds: 500));
+            unawaited(_autoScanServers(resumeFromIndex: 0));
+            return;
+          } else {
+            // Have enough servers, reset index for next cycle
+            debugPrint('✅ Full scan cycle complete: ${fastestServers.length}/$MAX_DISPLAY_SERVERS servers. Resetting to index 0 for next cycle.');
+            _lastScannedIndex = 0;
+            await _saveProgress();
+          }
+        }
+        
         await _saveCurrentNetworkProfile();
         debugPrint('✅ Auto-scan completed for $currentNetworkName');
       }
@@ -810,8 +867,11 @@ class VPNService {
 
   static Future<void> _saveProgress() async {
     try {
+      if (currentNetworkId == null || currentNetworkId == 'none') return;
+      
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setInt('last_scanned_index', _lastScannedIndex);
+      // ← CHANGED: Save network-specific index
+      await prefs.setInt('last_scanned_index_$currentNetworkId', _lastScannedIndex);
     } catch (e) {
       debugPrint('❌ Save progress error: $e');
     }
@@ -981,8 +1041,11 @@ class VPNService {
             return false;
           }
 
-          _lastScannedIndex = 0;
-          await _saveProgress();
+          // ← CHANGED: Reset network-specific index
+          if (currentNetworkId != null && currentNetworkId != 'none') {
+            _lastScannedIndex = 0;
+            await prefs.setInt('last_scanned_index_$currentNetworkId', 0);
+          }
           
           // Initialize previous config set
           _previousConfigSet = configServers.toSet();
@@ -1054,16 +1117,14 @@ class VPNService {
   static Future<Map<String, dynamic>> _unifiedConnectFlow(bool connectImmediately) async {
     debugPrint('🔵 Using unified connect flow for $currentNetworkName');
 
-    // Step 0: Try displayed servers first
+    // Step 0: Try displayed servers first (already sorted by success rate → ping)
     if (fastestServers.isNotEmpty) {
-      debugPrint('🔵 Trying ${fastestServers.length} displayed servers...');
-      final sortedDisplayed = List<ServerInfo>.from(fastestServers)
-        ..sort((a, b) => a.ping.compareTo(b.ping));
+      debugPrint('🔵 Trying ${fastestServers.length} displayed servers (sorted by success rate)...');
 
-      for (int i = 0; i < sortedDisplayed.length && !_cancelScan; i++) {
-        debugPrint('🔵 Testing displayed server ${i + 1}/${sortedDisplayed.length}: ${sortedDisplayed[i].name}...');
+      for (int i = 0; i < fastestServers.length && !_cancelScan; i++) {
+        debugPrint('🔵 Testing displayed server ${i + 1}/${fastestServers.length}: ${fastestServers[i].name} (${(fastestServers[i].successRate * 100).toStringAsFixed(0)}% / ${fastestServers[i].ping}ms)...');
         final result =
-            await _testServerWithPing(sortedDisplayed[i].config, timeout: userTestTimeout)
+            await _testServerWithPing(fastestServers[i].config, timeout: userTestTimeout)
                 .timeout(userTestTimeout, onTimeout: () => null);
 
         if (result != null) {
@@ -1074,7 +1135,7 @@ class VPNService {
                 fastestServers.indexWhere((s) => s.config == result.config);
             if (index != -1) {
               fastestServers[index] = result;
-              fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+              _sortServersBySuccessRateAndPing();
               _enforceServerLimit();
               serversStreamController.add(List.from(fastestServers));
             }
@@ -1084,8 +1145,8 @@ class VPNService {
             return {'success': true, 'server': result.config, 'ping': result.ping};
           }
         } else {
-          debugPrint('⚠️ Server failed: ${sortedDisplayed[i].name}');
-          _recordFailure(sortedDisplayed[i].config);
+          debugPrint('⚠️ Server failed: ${fastestServers[i].name}');
+          _recordFailure(fastestServers[i].config);
         }
       }
       if (_cancelScan) {
@@ -1109,7 +1170,7 @@ class VPNService {
           isScanning = false;
           if (!fastestServers.any((s) => s.config == result.config)) {
             fastestServers.add(result);
-            fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+            _sortServersBySuccessRateAndPing();
             _enforceServerLimit();
             serversStreamController.add(List.from(fastestServers));
           }
@@ -1136,7 +1197,7 @@ class VPNService {
             isScanning = false;
             if (!fastestServers.any((s) => s.config == result.config)) {
               fastestServers.add(result);
-              fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+              _sortServersBySuccessRateAndPing();
               _enforceServerLimit();
               serversStreamController.add(List.from(fastestServers));
             }
@@ -1167,7 +1228,7 @@ class VPNService {
           isScanning = false;
           if (!fastestServers.any((s) => s.config == result.config)) {
             fastestServers.add(result);
-            fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+            _sortServersBySuccessRateAndPing();
             _enforceServerLimit();
             serversStreamController.add(List.from(fastestServers));
           }
@@ -1241,34 +1302,8 @@ class VPNService {
       processed.addAll(goodCached);
     }
 
-    // Priority 5: FALLBACK - If network-specific is empty, use global cache
-    if (currentNetworkId != null && currentNetworkId != 'none') {
-      final profile = networkProfiles[currentNetworkId!];
-      
-      if (profile == null || profile.topServers.isEmpty) {
-        debugPrint('📦 Network cache empty, using global fallback');
-        
-        // Add servers sorted by global success rate
-        final globalBest = serverCache.entries
-            .where((e) => 
-                e.value.successCount > 0 && 
-                configServers.contains(e.key) &&
-                !processed.contains(e.key))
-            .map((e) => MapEntry(e.key, e.value.successRate))
-            .toList();
-        
-        // Sort by global success rate
-        globalBest.sort((a, b) => b.value.compareTo(a.value));
-        
-        final globalConfigs = globalBest.map((e) => e.key).toList();
-        result.addAll(globalConfigs);
-        processed.addAll(globalConfigs);
-        
-        debugPrint('📦 Added ${globalConfigs.length} servers from global cache');
-      }
-    }
-
-    // Priority 6: Remaining (newest first, then shuffled)
+    // Priority 5: Remaining (newest first, then shuffled)
+    // ← CHANGED: Removed global fallback that was breaking index order
     final remaining = configServers
         .where((c) => !processed.contains(c) && !scannedServers.contains(c))
         .toList();
