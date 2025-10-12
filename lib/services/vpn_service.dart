@@ -696,7 +696,7 @@ class VPNService {
     }
   }
 
-  // ========================= AUTO-SCAN =========================
+    // ========================= AUTO-SCAN =========================
   static Future<void> _autoScanServers({int resumeFromIndex = 0}) async {
     if (_isBackgroundScanning) {
       debugPrint('⚠️ Auto-scan already running, skipping');
@@ -737,47 +737,102 @@ class VPNService {
 
       final prioritized = _prioritizeServers();
 
-      // Stage A: TCP prefilter (SKIP FOR WIFI)
-      List<String> toTest;
-      final remaining = prioritized.sublist(resumeFromIndex);
-      
+      // WIFI: Use actual connection attempts (no TCP prefilter, no getServerDelay)
       if (_isWiFiNetwork()) {
-        debugPrint('📶 WiFi detected - skipping TCP prefilter, testing servers directly');
-        toTest = remaining;
+        debugPrint('📶 WiFi detected - using connection-based auto-scan');
+        
+        final remaining = prioritized.sublist(resumeFromIndex);
+        
+        for (int i = 0; i < remaining.length; i++) {
+          if ((resumeFromIndex + i) % 5 == 0) {
+            _lastScannedIndex = resumeFromIndex + i;
+            await _saveProgress();
+          }
+
+          if (fastestServers.length >= MAX_DISPLAY_SERVERS || isConnected || _cancelAutoScan) {
+            if (isConnected) debugPrint('🛑 Auto-scan stopped: User connected');
+            if (_cancelAutoScan) debugPrint('🛑 Auto-scan cancelled');
+            if (fastestServers.length >= MAX_DISPLAY_SERVERS) debugPrint('✅ Reached $MAX_DISPLAY_SERVERS servers limit');
+            break;
+          }
+
+          final config = remaining[i];
+          debugPrint('🔵 WiFi auto-scan: Testing server ${i + 1}/${remaining.length}...');
+          
+          // Try actual connection (testOnly mode)
+          final connected = await connect(
+            vlessUri: config,
+            ping: null,
+            testOnly: true,
+            retryWithoutDoH: false, // Fast test, no DoH retry
+          );
+
+          if (connected) {
+            debugPrint('✅ WiFi auto-scan: Server works!');
+            
+            // Add to display if not already there
+            if (!fastestServers.any((s) => s.config == config)) {
+              final cached = serverCache[config];
+              if (cached != null) {
+                fastestServers.add(ServerInfo(
+                  config: config,
+                  protocol: cached.protocol,
+                  ping: cached.lastPing,
+                  name: cached.name,
+                  successRate: cached.getNetworkSuccessRate(currentNetworkId!),
+                ));
+                fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+                _enforceServerLimit();
+                await _saveCurrentNetworkProfile();
+                serversStreamController.add(List.from(fastestServers));
+                debugPrint('✅ WiFi auto-scan: Added to display (${fastestServers.length}/$MAX_DISPLAY_SERVERS)');
+              }
+            }
+          } else {
+            debugPrint('⚠️ WiFi auto-scan: Server failed');
+          }
+          
+          // Small delay between tests to avoid overwhelming network
+          await Future.delayed(const Duration(milliseconds: 500));
+        }
+        
       } else {
-        debugPrint('⚡ TCP prefiltering ${remaining.length} servers with concurrency $tcpFastConcurrency...');
-        toTest = await _tcpPrefilterConfigs(
+        // MOBILE: Use existing method with TCP prefilter + getServerDelay
+        debugPrint('⚡ TCP prefiltering ${prioritized.length - resumeFromIndex} servers with concurrency $tcpFastConcurrency...');
+        
+        final remaining = prioritized.sublist(resumeFromIndex);
+        final toTest = await _tcpPrefilterConfigs(
           remaining,
           timeout: tcpFastTimeout,
           concurrency: tcpFastConcurrency,
           stopOnCount: 0,
         );
         debugPrint('✅ TCP prefilter survivors: ${toTest.length}');
-      }
 
-      // Stage B: Verify survivors sequentially until MAX_DISPLAY_SERVERS
-      for (int i = 0; i < toTest.length; i++) {
-        if ((resumeFromIndex + i) % 5 == 0) {
-          _lastScannedIndex = resumeFromIndex + i;
-          await _saveProgress();
-        }
+        // Stage B: Verify survivors sequentially until MAX_DISPLAY_SERVERS
+        for (int i = 0; i < toTest.length; i++) {
+          if ((resumeFromIndex + i) % 5 == 0) {
+            _lastScannedIndex = resumeFromIndex + i;
+            await _saveProgress();
+          }
 
-        if (fastestServers.length >= MAX_DISPLAY_SERVERS || isConnected || _cancelAutoScan) {
-          if (isConnected) debugPrint('🛑 Auto-scan stopped: User connected');
-          if (_cancelAutoScan) debugPrint('🛑 Auto-scan cancelled');
-          if (fastestServers.length >= MAX_DISPLAY_SERVERS) debugPrint('✅ Reached $MAX_DISPLAY_SERVERS servers limit');
-          break;
-        }
+          if (fastestServers.length >= MAX_DISPLAY_SERVERS || isConnected || _cancelAutoScan) {
+            if (isConnected) debugPrint('🛑 Auto-scan stopped: User connected');
+            if (_cancelAutoScan) debugPrint('🛑 Auto-scan cancelled');
+            if (fastestServers.length >= MAX_DISPLAY_SERVERS) debugPrint('✅ Reached $MAX_DISPLAY_SERVERS servers limit');
+            break;
+          }
 
-        final config = toTest[i];
-        final result = await _testServerWithPing(config, timeout: bgVerifyTimeout);
-        if (result != null && !isConnected && fastestServers.length < MAX_DISPLAY_SERVERS) {
-          if (!fastestServers.any((s) => s.config == result.config)) {
-            fastestServers.add(result);
-            fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
-            _enforceServerLimit();
-            await _saveCurrentNetworkProfile();
-            serversStreamController.add(List.from(fastestServers));
+          final config = toTest[i];
+          final result = await _testServerWithPing(config, timeout: bgVerifyTimeout);
+          if (result != null && !isConnected && fastestServers.length < MAX_DISPLAY_SERVERS) {
+            if (!fastestServers.any((s) => s.config == result.config)) {
+              fastestServers.add(result);
+              fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+              _enforceServerLimit();
+              await _saveCurrentNetworkProfile();
+              serversStreamController.add(List.from(fastestServers));
+            }
           }
         }
       }
