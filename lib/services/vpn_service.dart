@@ -73,6 +73,9 @@ class VPNService {
   static bool _isVpnStateChanging = false;
   static Timer? _networkChangeDebounceTimer;
 
+  // Testing flag to prevent false CONNECTED status during tests
+  static bool _isTesting = false;
+
   // Caching (now network-aware)
   static Map<String, ServerCache> serverCache = {};
   static String? lastGoodServer;
@@ -156,6 +159,12 @@ class VPNService {
 
   // ========================= STATUS =========================
   static void _updateConnectionState(V2RayStatus status) {
+    // IGNORE status updates during testing to prevent false positives
+    if (_isTesting) {
+      debugPrint('🔵 Ignoring status during test: ${status.state}');
+      return;
+    }
+
     final newIsConnected = status.state == 'CONNECTED';
 
     if (newIsConnected) {
@@ -607,23 +616,15 @@ class VPNService {
     if (newServers.isEmpty || currentNetworkId == null || currentNetworkId == 'none') return;
 
     try {
-      // Skip TCP prefilter for WiFi
-      List<String> toVerify;
-      
-      if (_isWiFiNetwork()) {
-        debugPrint('📶 WiFi detected - skipping TCP prefilter for new servers');
-        toVerify = newServers.take(5).toList();
-      } else {
-        // TCP prefilter for mobile data
-        final tcpOk = await _tcpPrefilterConfigs(
-          newServers,
-          timeout: tcpFastTimeout,
-          concurrency: tcpFastConcurrency,
-          stopOnCount: 0,
-        );
-        debugPrint('✅ New servers TCP prefilter: ${tcpOk.length}/${newServers.length} passed');
-        toVerify = tcpOk.take(5).toList();
-      }
+      // TCP prefilter for both WiFi and Mobile (same treatment)
+      final tcpOk = await _tcpPrefilterConfigs(
+        newServers,
+        timeout: tcpFastTimeout,
+        concurrency: tcpFastConcurrency,
+        stopOnCount: 0,
+      );
+      debugPrint('✅ New servers TCP prefilter: ${tcpOk.length}/${newServers.length} passed');
+      final toVerify = tcpOk.take(5).toList();
 
       // Verify survivors (limit to 5 to avoid blocking too long)
       for (final config in toVerify) {
@@ -644,7 +645,9 @@ class VPNService {
     } catch (e) {
       debugPrint('❌ Verify new servers error: $e');
     }
-  }  static Future<void> _pruneStaleServers() async {
+  }
+
+  static Future<void> _pruneStaleServers() async {
     if (currentNetworkId == null || currentNetworkId == 'none') return;
 
     try {
@@ -694,9 +697,7 @@ class VPNService {
     } catch (e) {
       debugPrint('❌ Prune error: $e');
     }
-  }
-
-    // ========================= AUTO-SCAN =========================
+  }  // ========================= AUTO-SCAN =========================
   static Future<void> _autoScanServers({int resumeFromIndex = 0}) async {
     if (_isBackgroundScanning) {
       debugPrint('⚠️ Auto-scan already running, skipping');
@@ -733,105 +734,63 @@ class VPNService {
 
       final startMsg =
           resumeFromIndex > 0 ? 'resuming from index $resumeFromIndex' : 'starting fresh';
-      debugPrint('🔵 Auto-scan on $currentNetworkName: Finding $MAX_DISPLAY_SERVERS servers ($startMsg)...');
+      debugPrint('🔵 Auto-scan on $currentNetworkName: Finding servers ($startMsg)...');
 
       final prioritized = _prioritizeServers();
 
-      // WIFI: Use actual connection attempts (no TCP prefilter, no getServerDelay)
-      if (_isWiFiNetwork()) {
-        debugPrint('📶 WiFi detected - using connection-based auto-scan');
-        
-        final remaining = prioritized.sublist(resumeFromIndex);
-        
-        for (int i = 0; i < remaining.length; i++) {
-          if ((resumeFromIndex + i) % 5 == 0) {
-            _lastScannedIndex = resumeFromIndex + i;
-            await _saveProgress();
-          }
+      // UNIFIED APPROACH: Use TCP prefilter + getServerDelay for BOTH WiFi and Mobile
+      debugPrint('⚡ TCP prefiltering ${prioritized.length - resumeFromIndex} servers with concurrency $tcpFastConcurrency...');
+      
+      final remaining = prioritized.sublist(resumeFromIndex);
+      final toTest = await _tcpPrefilterConfigs(
+        remaining,
+        timeout: tcpFastTimeout,
+        concurrency: tcpFastConcurrency,
+        stopOnCount: 0,
+      );
+      debugPrint('✅ TCP prefilter survivors: ${toTest.length}');
 
-          if (fastestServers.length >= MAX_DISPLAY_SERVERS || isConnected || _cancelAutoScan) {
-            if (isConnected) debugPrint('🛑 Auto-scan stopped: User connected');
-            if (_cancelAutoScan) debugPrint('🛑 Auto-scan cancelled');
-            if (fastestServers.length >= MAX_DISPLAY_SERVERS) debugPrint('✅ Reached $MAX_DISPLAY_SERVERS servers limit');
-            break;
-          }
-
-          final config = remaining[i];
-          debugPrint('🔵 WiFi auto-scan: Testing server ${i + 1}/${remaining.length}...');
-          
-          // Try actual connection (testOnly mode)
-          final connected = await connect(
-            vlessUri: config,
-            ping: null,
-            testOnly: true,
-            retryWithoutDoH: false, // Fast test, no DoH retry
-          );
-
-          if (connected) {
-            debugPrint('✅ WiFi auto-scan: Server works!');
-            
-            // Add to display if not already there
-            if (!fastestServers.any((s) => s.config == config)) {
-              final cached = serverCache[config];
-              if (cached != null) {
-                fastestServers.add(ServerInfo(
-                  config: config,
-                  protocol: cached.protocol,
-                  ping: cached.lastPing,
-                  name: cached.name,
-                  successRate: cached.getNetworkSuccessRate(currentNetworkId!),
-                ));
-                fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
-                _enforceServerLimit();
-                await _saveCurrentNetworkProfile();
-                serversStreamController.add(List.from(fastestServers));
-                debugPrint('✅ WiFi auto-scan: Added to display (${fastestServers.length}/$MAX_DISPLAY_SERVERS)');
-              }
-            }
-          } else {
-            debugPrint('⚠️ WiFi auto-scan: Server failed');
-          }
-          
-          // Small delay between tests to avoid overwhelming network
-          await Future.delayed(const Duration(milliseconds: 500));
+      // Stage B: Verify survivors sequentially, continue even after MAX_DISPLAY_SERVERS
+      for (int i = 0; i < toTest.length; i++) {
+        if ((resumeFromIndex + i) % 5 == 0) {
+          _lastScannedIndex = resumeFromIndex + i;
+          await _saveProgress();
         }
+
+        // ONLY stop if user connects or cancels (NOT when reaching MAX_DISPLAY_SERVERS)
+        if (isConnected || _cancelAutoScan) {
+          if (isConnected) debugPrint('🛑 Auto-scan stopped: User connected');
+          if (_cancelAutoScan) debugPrint('🛑 Auto-scan cancelled');
+          break;
+        }
+
+        final config = toTest[i];
+        final result = await _testServerWithPing(config, timeout: bgVerifyTimeout);
         
-      } else {
-        // MOBILE: Use existing method with TCP prefilter + getServerDelay
-        debugPrint('⚡ TCP prefiltering ${prioritized.length - resumeFromIndex} servers with concurrency $tcpFastConcurrency...');
-        
-        final remaining = prioritized.sublist(resumeFromIndex);
-        final toTest = await _tcpPrefilterConfigs(
-          remaining,
-          timeout: tcpFastTimeout,
-          concurrency: tcpFastConcurrency,
-          stopOnCount: 0,
-        );
-        debugPrint('✅ TCP prefilter survivors: ${toTest.length}');
-
-        // Stage B: Verify survivors sequentially until MAX_DISPLAY_SERVERS
-        for (int i = 0; i < toTest.length; i++) {
-          if ((resumeFromIndex + i) % 5 == 0) {
-            _lastScannedIndex = resumeFromIndex + i;
-            await _saveProgress();
-          }
-
-          if (fastestServers.length >= MAX_DISPLAY_SERVERS || isConnected || _cancelAutoScan) {
-            if (isConnected) debugPrint('🛑 Auto-scan stopped: User connected');
-            if (_cancelAutoScan) debugPrint('🛑 Auto-scan cancelled');
-            if (fastestServers.length >= MAX_DISPLAY_SERVERS) debugPrint('✅ Reached $MAX_DISPLAY_SERVERS servers limit');
-            break;
-          }
-
-          final config = toTest[i];
-          final result = await _testServerWithPing(config, timeout: bgVerifyTimeout);
-          if (result != null && !isConnected && fastestServers.length < MAX_DISPLAY_SERVERS) {
+        if (result != null && !isConnected) {
+          // Always update cache (learning phase)
+          
+          // Only add to display if < MAX_DISPLAY_SERVERS
+          if (fastestServers.length < MAX_DISPLAY_SERVERS) {
             if (!fastestServers.any((s) => s.config == result.config)) {
               fastestServers.add(result);
               fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
               _enforceServerLimit();
               await _saveCurrentNetworkProfile();
               serversStreamController.add(List.from(fastestServers));
+              debugPrint('✅ Added to display (${fastestServers.length}/$MAX_DISPLAY_SERVERS): ${result.name}');
+            }
+          } else {
+            // Try to replace slower server if this one is faster
+            if (result.ping < fastestServers.last.ping) {
+              fastestServers.removeLast();
+              fastestServers.add(result);
+              fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+              await _saveCurrentNetworkProfile();
+              serversStreamController.add(List.from(fastestServers));
+              debugPrint('✅ Replaced slower server with ${result.name} (${result.ping}ms < ${fastestServers.last.ping}ms)');
+            } else {
+              debugPrint('📊 Server tested but not added (slower): ${result.name} (${result.ping}ms)');
             }
           }
         }
@@ -839,6 +798,7 @@ class VPNService {
 
       if (!isConnected) {
         await _saveCurrentNetworkProfile();
+        debugPrint('✅ Auto-scan completed for $currentNetworkName');
       }
     } catch (e) {
       debugPrint('❌ Auto-scan error: $e');
@@ -1086,144 +1046,17 @@ class VPNService {
     totalToScan = 0;
     scanProgressController.add(0);
 
-    // WIFI: Try connecting directly (no getServerDelay testing)
-    if (_isWiFiNetwork()) {
-      return await _wifiConnectFlow(connectImmediately);
-    }
-
-    // MOBILE: Use existing flow with getServerDelay testing
-    return await _mobileConnectFlow(connectImmediately);
+    // UNIFIED FLOW: Same for both WiFi and Mobile
+    return await _unifiedConnectFlow(connectImmediately);
   }
 
-  // ========================= WIFI CONNECT FLOW =========================
-  static Future<Map<String, dynamic>> _wifiConnectFlow(bool connectImmediately) async {
-    debugPrint('📶 WiFi detected - using direct connection strategy');
+  // ========================= UNIFIED CONNECT FLOW =========================
+  static Future<Map<String, dynamic>> _unifiedConnectFlow(bool connectImmediately) async {
+    debugPrint('🔵 Using unified connect flow for $currentNetworkName');
 
     // Step 0: Try displayed servers first
     if (fastestServers.isNotEmpty) {
-      debugPrint('🔵 Trying ${fastestServers.length} displayed servers on WiFi...');
-      final sortedDisplayed = List<ServerInfo>.from(fastestServers)
-        ..sort((a, b) => a.ping.compareTo(b.ping));
-
-      for (int i = 0; i < sortedDisplayed.length && !_cancelScan; i++) {
-        debugPrint('🔵 Trying to connect to displayed server ${i + 1}/${sortedDisplayed.length}: ${sortedDisplayed[i].name}...');
-        
-        final connected = await connect(
-          vlessUri: sortedDisplayed[i].config,
-          ping: sortedDisplayed[i].ping,
-          testOnly: !connectImmediately,
-        );
-
-        if (connected) {
-          isScanning = false;
-          debugPrint('✅ Connected to displayed server on WiFi');
-          return {'success': true, 'server': sortedDisplayed[i].config, 'ping': sortedDisplayed[i].ping};
-        } else {
-          debugPrint('⚠️ Failed to connect: ${sortedDisplayed[i].name}');
-          _recordFailure(sortedDisplayed[i].config);
-        }
-      }
-    }
-
-    if (_cancelScan) {
-      isScanning = false;
-      return {'success': false, 'error': 'Scan cancelled'};
-    }
-
-    // Step 1: Try universal servers (work on 3+ networks)
-    final universal = _getUniversalServers();
-    if (universal.isNotEmpty) {
-      debugPrint('🌍 Trying ${universal.length} universal servers on WiFi...');
-      for (int i = 0; i < universal.length && !_cancelScan; i++) {
-        debugPrint('🔵 Trying universal server ${i + 1}/${universal.length}...');
-        
-        final connected = await connect(
-          vlessUri: universal[i],
-          ping: null,
-          testOnly: !connectImmediately,
-        );
-
-        if (connected) {
-          isScanning = false;
-          // Add to display if not already there
-          if (!fastestServers.any((s) => s.config == universal[i])) {
-            final cached = serverCache[universal[i]];
-            if (cached != null) {
-              fastestServers.add(ServerInfo(
-                config: universal[i],
-                protocol: cached.protocol,
-                ping: cached.lastPing,
-                name: cached.name,
-                successRate: cached.getNetworkSuccessRate(currentNetworkId!),
-              ));
-              _enforceServerLimit();
-              serversStreamController.add(List.from(fastestServers));
-            }
-          }
-          await _saveCurrentNetworkProfile();
-          debugPrint('✅ Connected to universal server on WiFi');
-          return {'success': true, 'server': universal[i]};
-        }
-      }
-    }
-
-    // Step 2: Try new servers from prioritized list
-    debugPrint('🔵 Trying new servers on WiFi...');
-    final prioritized = _prioritizeServers();
-    
-    for (var config in prioritized) {
-      if (_cancelScan || isConnected) break;
-      
-      debugPrint('🔵 Trying to connect...');
-      final connected = await connect(
-        vlessUri: config,
-        ping: null,
-        testOnly: !connectImmediately,
-      );
-
-      if (connected) {
-        isScanning = false;
-        // Add to display
-        if (!fastestServers.any((s) => s.config == config)) {
-          final cached = serverCache[config];
-          if (cached != null) {
-            fastestServers.add(ServerInfo(
-              config: config,
-              protocol: cached.protocol,
-              ping: cached.lastPing,
-              name: cached.name,
-              successRate: cached.getNetworkSuccessRate(currentNetworkId!),
-            ));
-            _enforceServerLimit();
-            serversStreamController.add(List.from(fastestServers));
-          }
-        }
-        await _saveCurrentNetworkProfile();
-        debugPrint('✅ Connected to new server on WiFi');
-        return {'success': true, 'server': config};
-      }
-    }
-
-    isScanning = false;
-    if (_cancelScan) {
-      _cancelScan = false;
-      return {'success': false, 'error': 'Scan cancelled'};
-    }
-    
-    // Trigger background scan
-    debugPrint('⚠️ No servers connected on WiFi, starting background scan...');
-    unawaited(_autoScanServers());
-    
-    return {'success': false, 'error': 'No working servers found'};
-  }
-
-  // ========================= MOBILE CONNECT FLOW =========================
-  static Future<Map<String, dynamic>> _mobileConnectFlow(bool connectImmediately) async {
-    debugPrint('📱 Mobile data - using getServerDelay testing');
-
-    // Step 0: Test displayed servers first
-    if (fastestServers.isNotEmpty) {
-      debugPrint('🔵 Testing ${fastestServers.length} displayed servers...');
+      debugPrint('🔵 Trying ${fastestServers.length} displayed servers...');
       final sortedDisplayed = List<ServerInfo>.from(fastestServers)
         ..sort((a, b) => a.ping.compareTo(b.ping));
 
@@ -1251,7 +1084,7 @@ class VPNService {
             return {'success': true, 'server': result.config, 'ping': result.ping};
           }
         } else {
-          debugPrint('⚠️ Soft-fail on mobile (demote): ${sortedDisplayed[i].name}');
+          debugPrint('⚠️ Server failed: ${sortedDisplayed[i].name}');
           _recordFailure(sortedDisplayed[i].config);
         }
       }
@@ -1262,7 +1095,35 @@ class VPNService {
       }
     }
 
-    // Step 1: Fallback to network's known-good servers
+    // Step 1: Try universal servers (work on 3+ networks)
+    final universal = _getUniversalServers();
+    if (universal.isNotEmpty) {
+      debugPrint('🌍 Trying ${universal.length} universal servers...');
+      for (int i = 0; i < universal.length && !_cancelScan; i++) {
+        debugPrint('🔵 Testing universal server ${i + 1}/${universal.length}...');
+        
+        final result = await _testServerWithPing(universal[i], timeout: userTestTimeout)
+            .timeout(userTestTimeout, onTimeout: () => null);
+
+        if (result != null) {
+          isScanning = false;
+          if (!fastestServers.any((s) => s.config == result.config)) {
+            fastestServers.add(result);
+            fastestServers.sort((a, b) => a.ping.compareTo(b.ping));
+            _enforceServerLimit();
+            serversStreamController.add(List.from(fastestServers));
+          }
+          await _saveCurrentNetworkProfile();
+          if (connectImmediately) {
+            await connect(vlessUri: result.config, ping: result.ping);
+          }
+          debugPrint('✅ Connected to universal server');
+          return {'success': true, 'server': result.config, 'ping': result.ping};
+        }
+      }
+    }
+
+    // Step 2: Fallback to network's known-good servers
     if (!isConnected && fastestServers.isEmpty && currentNetworkId != null && currentNetworkId != 'none') {
       final fallback = _getKnownGoodForNetwork(currentNetworkId!);
       if (fallback.isNotEmpty) {
@@ -1280,7 +1141,9 @@ class VPNService {
               serversStreamController.add(List.from(fastestServers));
             }
             await _saveCurrentNetworkProfile();
-            await connect(vlessUri: result.config, ping: result.ping);
+            if (connectImmediately) {
+              await connect(vlessUri: result.config, ping: result.ping);
+            }
             debugPrint('🔵 Connected from known-good pool');
             return {'success': true, 'server': result.config, 'ping': result.ping};
           }
@@ -1288,8 +1151,8 @@ class VPNService {
       }
     }
 
-    // Step 2: Scan new servers
-    debugPrint('🔵 Scanning for new servers on mobile...');
+    // Step 3: Scan new servers
+    debugPrint('🔵 Scanning for new servers...');
     final prioritized = _prioritizeServers();
     
     for (var config in prioritized) {
@@ -1456,13 +1319,6 @@ class VPNService {
   // ========================= TESTS =========================
   static Future<ServerInfo?> _testServerWithPing(String uri, {Duration? timeout}) async {
     if (currentNetworkId == null || currentNetworkId == 'none') return null;
-
-    // WiFi: Don't use getServerDelay, it doesn't work on this network
-    // Mobile: Use getServerDelay (works fine)
-    if (_isWiFiNetwork()) {
-      debugPrint('📶 WiFi: Skipping getServerDelay test (unreliable on WiFi)');
-      return null;
-    }
 
     try {
       final parser = V2ray.parseFromURL(uri);
@@ -1698,6 +1554,11 @@ class VPNService {
       _isManualDisconnect = false;
       _isVpnStateChanging = true;
 
+      // Set testing flag if testOnly to prevent false CONNECTED status
+      if (testOnly) {
+        _isTesting = true;
+      }
+
       final parser = V2ray.parseFromURL(vlessUri);
       var config = parser.getFullConfiguration();
       
@@ -1723,6 +1584,7 @@ class VPNService {
 
           if (testOnly) {
             await v2ray.stopV2Ray();
+            _isTesting = false;
             _isVpnStateChanging = false;
             debugPrint('✅ Test connection successful (Direct DNS)');
             return true;
@@ -1782,6 +1644,7 @@ class VPNService {
           await prefs.setString('last_good_server', vlessUri);
           unawaited(_saveCache());
 
+          _isTesting = false;
           _isVpnStateChanging = false;
           debugPrint('✅ Connected successfully (Direct DNS) on $currentNetworkName');
           return true;
@@ -1789,7 +1652,7 @@ class VPNService {
         } catch (e) {
           debugPrint('⚠️ Direct DNS connection failed: $e');
           
-          if (retryWithoutDoH) {
+          if (retryWithoutDoH && !testOnly) {
             debugPrint('🔄 Retrying with DoH...');
             await v2ray.stopV2Ray();
             await Future.delayed(const Duration(milliseconds: 500));
@@ -1811,6 +1674,7 @@ class VPNService {
             if (delay != -1 && delay < 8000) {
               if (testOnly) {
                 await v2ray.stopV2Ray();
+                _isTesting = false;
                 _isVpnStateChanging = false;
                 debugPrint('✅ Test connection successful (DoH)');
                 return true;
@@ -1823,6 +1687,7 @@ class VPNService {
               final prefs = await SharedPreferences.getInstance();
               await prefs.setString('last_good_server', vlessUri);
               
+              _isTesting = false;
               _isVpnStateChanging = false;
               debugPrint('✅ Connected successfully (DoH fallback) on $currentNetworkName');
               return true;
@@ -1832,9 +1697,11 @@ class VPNService {
           throw e;
         }
       }
+      _isTesting = false;
       _isVpnStateChanging = false;
       return false;
     } catch (e) {
+      _isTesting = false;
       _isVpnStateChanging = false;
       
       final existing = serverCache[vlessUri];
@@ -1961,3 +1828,27 @@ class VPNService {
 
 // Helper to ignore unawaited futures
 void unawaited(Future<void> future) {}
+
+class ConnectionStats {
+  final int totalDownload;
+  final int totalUpload;
+  final DateTime date;
+
+  ConnectionStats({
+    required this.totalDownload,
+    required this.totalUpload,
+    required this.date,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'totalDownload': totalDownload,
+    'totalUpload': totalUpload,
+    'date': date.toIso8601String(),
+  };
+
+  factory ConnectionStats.fromJson(Map<String, dynamic> json) => ConnectionStats(
+    totalDownload: json['totalDownload'] ?? 0,
+    totalUpload: json['totalUpload'] ?? 0,
+    date: DateTime.parse(json['date']),
+  );
+}
