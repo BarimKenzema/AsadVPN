@@ -215,6 +215,9 @@ class VPNService {
       
       // Reset reconnect attempts on successful connection
       _reconnectAttempts = 0;
+      
+      // FIX: Reset VPN state changing flag when successfully connected
+      _isVpnStateChanging = false;
     }
 
     statusStreamController.add(status);
@@ -231,9 +234,11 @@ class VPNService {
 
       if (!newIsConnected && currentConnectedConfig != null && !_isManualDisconnect) {
         debugPrint('⚠️ Unexpected disconnect detected');
+        _isVpnStateChanging = false;  // FIX: Reset flag before reconnecting
         _handleDisconnect();
       } else if (!newIsConnected && _isManualDisconnect) {
         debugPrint('🔵 Manual disconnect, no reconnection needed');
+        _isVpnStateChanging = false;  // FIX: Reset flag
       }
     }
   }
@@ -242,6 +247,9 @@ class VPNService {
   static void _handleDisconnect() {
     debugPrint('⚠️ Unexpected disconnect, attempting smart reconnect...');
     _lastConnectionTime = null;
+    
+    // FIX: Reset VPN state changing flag
+    _isVpnStateChanging = false;
     
     Future.delayed(const Duration(seconds: 2), () async {
       if (!isConnected && fastestServers.isNotEmpty && !_isManualDisconnect) {
@@ -269,8 +277,9 @@ class VPNService {
             _reconnectAttempts = 0;
             return;
           } else {
-            // Blacklist failed server temporarily
-            _blacklistServer(server.config);
+            debugPrint('⚠️ Reconnect failed: ${server.name}');
+            _recordFailure(server.config);
+            _blacklistServer(server.config, duration: const Duration(minutes: 2));
           }
           
           await Future.delayed(const Duration(seconds: 1));
@@ -279,8 +288,38 @@ class VPNService {
         // All attempts failed
         debugPrint('❌ All $maxAttempts reconnect attempts failed');
         _reconnectAttempts++;
+        
+        // FIX: Notify UI that connection was lost
+        isConnected = false;
+        currentConnectedConfig = null;
+        currentConnectedPing = null;
+        connectionStateController.add(false);
+        serversStreamController.add(List.from(fastestServers));
       }
     });
+  }
+
+  // ========================= CHECK CONNECTION HEALTH (MANUAL) =========================
+  static Future<void> checkConnectionHealth() async {
+    if (!isConnected || _isManualDisconnect) return;
+    
+    try {
+      debugPrint('🔍 Manual health check...');
+      final delay = await v2ray.getConnectedServerDelay()
+          .timeout(const Duration(seconds: 6));
+      
+      if (delay == -1 || delay > 5000) {
+        debugPrint('⚠️ Connection unhealthy (delay: ${delay}ms), reconnecting...');
+        _handleDisconnect();
+      } else {
+        debugPrint('✅ Connection healthy (${delay}ms)');
+        // Refresh server list in UI
+        serversStreamController.add(List.from(fastestServers));
+      }
+    } catch (e) {
+      debugPrint('⚠️ Health check failed: $e - triggering reconnect');
+      _handleDisconnect();
+    }
   }
 
   // ========================= NETWORK DETECTION & SWITCHING =========================
@@ -584,9 +623,7 @@ class VPNService {
     } catch (e, stack) {
       debugPrint('❌ Init error: $e\n$stack');
     }
-  }
-
-  // ========================= SUBSCRIPTION REFRESH =========================
+  }  // ========================= SUBSCRIPTION REFRESH =========================
   static void _startSubscriptionRefresh() {
     _subscriptionRefreshTimer?.cancel();
     
@@ -783,7 +820,9 @@ class VPNService {
     } catch (e) {
       debugPrint('❌ Prune error: $e');
     }
-  }  // ========================= AUTO-SCAN =========================
+  }
+
+  // ========================= AUTO-SCAN =========================
   static Future<void> _autoScanServers({int resumeFromIndex = 0}) async {
     if (_isBackgroundScanning) {
       debugPrint('⚠️ Auto-scan already running, skipping');
@@ -930,7 +969,8 @@ class VPNService {
       if (isConnected && !_isManualDisconnect) {
         try {
           // Check 1: Server delay
-          final delay = await v2ray.getConnectedServerDelay();
+          final delay = await v2ray.getConnectedServerDelay()
+              .timeout(const Duration(seconds: 5));
           
           // Check 2: Traffic monitoring (no data received for 15 seconds)
           final now = DateTime.now();
@@ -945,7 +985,9 @@ class VPNService {
             _handleDisconnect();
           }
         } catch (e) {
-          debugPrint('❌ Health check error: $e');
+          // FIX: Don't silently fail - trigger reconnect on exception
+          debugPrint('⚠️ Health check exception: $e - triggering reconnect');
+          _handleDisconnect();
         }
       }
     });
@@ -1873,6 +1915,7 @@ class VPNService {
       _isVpnStateChanging = false;
       return false;
     } catch (e) {
+      // FIX: Always reset testing and state changing flags
       _isTesting = false;
       _isVpnStateChanging = false;
 
@@ -1904,6 +1947,15 @@ class VPNService {
         unawaited(_saveCache());
       }
       debugPrint('❌ Connection error: $e');
+      
+      // FIX: If this was supposed to be a real connection (not test), ensure we're marked as disconnected
+      if (!testOnly && isConnected) {
+        isConnected = false;
+        currentConnectedConfig = null;
+        currentConnectedPing = null;
+        connectionStateController.add(false);
+      }
+      
       return false;
     }
   }
