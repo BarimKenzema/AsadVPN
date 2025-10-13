@@ -230,6 +230,21 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
       debugPrint('📱 App resumed from background');
       _updateConnectionStatus();
       
+      // FIX 1: Always refresh server list when app resumes
+      if (VPNService.fastestServers.isNotEmpty) {
+        setState(() {
+          displayServers = List.from(VPNService.fastestServers);
+        });
+        debugPrint('✅ Refreshed server list: ${displayServers.length} servers');
+      }
+      
+      // FIX 2: Check connection health if connected
+      if (VPNService.isConnected) {
+        debugPrint('🔍 Checking connection health after resume...');
+        VPNService.checkConnectionHealth();
+      }
+      
+      // Resume auto-scan if not connected
       if (!VPNService.isConnected && 
           VPNService.fastestServers.length < VPNService.MAX_DISPLAY_SERVERS &&
           VPNService.currentSubscriptionLink != null &&
@@ -333,9 +348,7 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
     }
     
     setState(() => isConnecting = false);
-  }
-
-  void _showSubscriptionDialog() {
+  }  void _showSubscriptionDialog() {
     final controller = TextEditingController(text: VPNService.currentSubscriptionLink ?? '');
     showDialog(
       context: context,
