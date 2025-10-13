@@ -137,6 +137,7 @@ class VPNService {
     // Get servers that work on 3+ different networks
     final universal = serverCache.entries
         .where((e) {
+          // Count networks where this server has success rate > 0.5
           final workingNetworks = e.value.networkStats.entries
               .where((net) => (net.value.successCount / max(1, net.value.successCount + net.value.failureCount)) > 0.5)
               .length;
@@ -144,9 +145,11 @@ class VPNService {
         })
         .map((e) => e.key)
         .toList();
+    
     if (universal.isNotEmpty) {
       debugPrint('🌍 Found ${universal.length} universal servers (work on 3+ networks)');
     }
+    
     return universal;
   }
 
@@ -154,9 +157,13 @@ class VPNService {
   static bool _isServerBlacklisted(String config) {
     final blacklistedUntil = _serverBlacklist[config];
     if (blacklistedUntil == null) return false;
-    if (DateTime.now().isBefore(blacklistedUntil)) return true;
-    _serverBlacklist.remove(config); // expired
-    return false;
+    
+    if (DateTime.now().isBefore(blacklistedUntil)) {
+      return true;  // Still blacklisted
+    } else {
+      _serverBlacklist.remove(config);  // Blacklist expired
+      return false;
+    }
   }
 
   static void _blacklistServer(String config, {Duration duration = const Duration(minutes: 5)}) {
@@ -177,14 +184,18 @@ class VPNService {
   // ========================= HELPER: SORT SERVERS =========================
   static void _sortServersBySuccessRateAndPing() {
     fastestServers.sort((a, b) {
-      final rateCompare = b.successRate.compareTo(a.successRate); // higher first
+      // First: Compare success rates (descending - higher is better)
+      final rateCompare = b.successRate.compareTo(a.successRate);
       if (rateCompare != 0) return rateCompare;
-      return a.ping.compareTo(b.ping); // lower first
+      
+      // If same success rate: Compare pings (ascending - lower is better)
+      return a.ping.compareTo(b.ping);
     });
   }
 
   // ========================= STATUS =========================
   static void _updateConnectionState(V2RayStatus status) {
+    // IGNORE status updates during testing to prevent false positives
     if (_isTesting) {
       debugPrint('🔵 Ignoring status during test: ${status.state}');
       return;
@@ -195,10 +206,14 @@ class VPNService {
     if (newIsConnected) {
       sessionDownload = status.download;
       sessionUpload = status.upload;
+      
+      // Track data flow for traffic monitoring
       if (status.download > _lastDownloadBytes) {
         _lastDataReceived = DateTime.now();
         _lastDownloadBytes = status.download;
       }
+      
+      // Reset reconnect attempts on successful connection
       _reconnectAttempts = 0;
     }
 
@@ -227,29 +242,41 @@ class VPNService {
   static void _handleDisconnect() {
     debugPrint('⚠️ Unexpected disconnect, attempting smart reconnect...');
     _lastConnectionTime = null;
+    
     Future.delayed(const Duration(seconds: 2), () async {
       if (!isConnected && fastestServers.isNotEmpty && !_isManualDisconnect) {
+        // Try top 4 servers (skipping blacklisted ones)
         final maxAttempts = min(4, fastestServers.length);
+        
         for (int i = 0; i < maxAttempts; i++) {
           final server = fastestServers[i];
+          
+          // Skip blacklisted servers
           if (_isServerBlacklisted(server.config)) {
             debugPrint('⏭️ Skipping blacklisted server: ${server.name}');
             continue;
           }
+          
           debugPrint('🔄 Reconnect attempt ${i + 1}/$maxAttempts: ${server.name}');
+          
           final success = await connect(
             vlessUri: server.config,
             ping: server.ping,
           );
+          
           if (success) {
             debugPrint('✅ Reconnected to: ${server.name}');
             _reconnectAttempts = 0;
             return;
           } else {
+            // Blacklist failed server temporarily
             _blacklistServer(server.config);
           }
+          
           await Future.delayed(const Duration(seconds: 1));
         }
+        
+        // All attempts failed
         debugPrint('❌ All $maxAttempts reconnect attempts failed');
         _reconnectAttempts++;
       }
@@ -259,51 +286,49 @@ class VPNService {
   // ========================= NETWORK DETECTION & SWITCHING =========================
   static Future<void> _initNetworkDetection() async {
     try {
-      // Always set up listener first (do not return early on 'none')
-      _networkSubscription?.cancel();
+      // Get initial network
+      final networkInfo = await NetworkDetector.getCurrentNetwork();
+      
+      // Ignore "none" network type on init
+      if (networkInfo.type == 'none') {
+        debugPrint('⚠️ No network connection detected on init');
+        currentNetworkId = 'none';
+        currentNetworkName = 'No Connection';
+        return;
+      }
+      
+      currentNetworkId = networkInfo.id;
+      currentNetworkName = networkInfo.displayName;
+      debugPrint('🌐 Initial network: $currentNetworkName (ID: $currentNetworkId)');
+
+      // Load profile for current network
+      await _loadNetworkProfile(currentNetworkId!);
+
+      // Listen for network changes with debouncing
       _networkSubscription = NetworkDetector.networkStream.listen((networkInfo) async {
+        // IGNORE network changes during VPN state transitions
         if (_isVpnStateChanging) {
           debugPrint('🔵 Ignoring network change (VPN state changing)');
           return;
         }
+
+        final newNetworkId = networkInfo.id;
+        final newNetworkName = networkInfo.displayName;
+
+        // IGNORE "none" network type (VPN disconnect can trigger this)
         if (networkInfo.type == 'none') {
-          // Keep waiting for a valid network; do not tear down UI state
-          debugPrint('🔵 Network event: none (waiting for valid network)');
-          currentNetworkId = 'none';
-          currentNetworkName = 'No Connection';
+          debugPrint('🔵 Ignoring "No Connection" network event');
           return;
         }
-        // Debounce switch
+
+        // DEBOUNCE: Cancel previous timer and wait 2 seconds
         _networkChangeDebounceTimer?.cancel();
-        _networkChangeDebounceTimer = Timer(const Duration(seconds: 1), () async {
-          // Switch to new network
-          final newNetworkId = networkInfo.id;
-          final newNetworkName = networkInfo.displayName;
-          if (newNetworkId != currentNetworkId) {
+        _networkChangeDebounceTimer = Timer(const Duration(seconds: 2), () async {
+          if (newNetworkId != currentNetworkId && newNetworkId != 'none') {
             await _handleNetworkChange(newNetworkId, newNetworkName);
-          } else {
-            // Initial valid network or same ID; ensure profile is loaded
-            if (currentNetworkId == null || currentNetworkId == 'none') {
-              currentNetworkId = newNetworkId;
-              currentNetworkName = newNetworkName;
-              await _loadNetworkProfile(newNetworkId);
-            }
           }
         });
       });
-
-      // Get initial snapshot and try to load profile if valid
-      final snapshot = await NetworkDetector.getCurrentNetwork();
-      if (snapshot.type != 'none') {
-        currentNetworkId = snapshot.id;
-        currentNetworkName = snapshot.displayName;
-        debugPrint('🌐 Initial network: $currentNetworkName (ID: $currentNetworkId)');
-        await _loadNetworkProfile(currentNetworkId!);
-      } else {
-        currentNetworkId = 'none';
-        currentNetworkName = 'No Connection';
-        debugPrint('⚠️ No network on init – listener active, waiting for next event...');
-      }
     } catch (e) {
       debugPrint('❌ Network detection init error: $e');
     }
@@ -311,30 +336,47 @@ class VPNService {
 
   static Future<void> _handleNetworkChange(String newNetworkId, String newNetworkName) async {
     debugPrint('🔄 Network changed: $currentNetworkName → $newNetworkName');
-
+    
     // Save current network profile BEFORE switching
     if (currentNetworkId != null && currentNetworkId != 'none') {
       await _saveCurrentNetworkProfile();
     }
 
     // Switch to new network
+    final previousNetworkId = currentNetworkId;
     currentNetworkId = newNetworkId;
     currentNetworkName = newNetworkName;
-
+    
     // Clear blacklist on network change
     _serverBlacklist.clear();
-
+    
     // Notify UI
     networkChangeController.add(newNetworkName);
 
     // Load new network profile
     await _loadNetworkProfile(newNetworkId);
 
-    // If connected, try to ensure continuity (optional: reconnect top server)
+    // Auto-reconnect if was connected
     if (isConnected && currentConnectedConfig != null) {
-      debugPrint('🔄 Staying connected; will rely on health check to validate tunnel on new network');
+      debugPrint('🔄 Auto-reconnecting on new network...');
+      
+      // Mark as VPN state changing to prevent network change events during reconnect
+      _isVpnStateChanging = true;
+      
+      await disconnect();
+      await Future.delayed(const Duration(milliseconds: 800));
+      
+      // Try to connect using new network's best server
+      if (fastestServers.isNotEmpty) {
+        await connect(
+          vlessUri: fastestServers.first.config,
+          ping: fastestServers.first.ping,
+        );
+      }
+      
+      _isVpnStateChanging = false;
     } else if (!isConnected) {
-      // Start auto-scan regardless of current list size
+      // Start auto-scan for new network (ALWAYS, regardless of server count)
       debugPrint('🔍 Starting auto-scan for new network...');
       unawaited(_autoScanServers());
     }
@@ -344,6 +386,7 @@ class VPNService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final profilesJson = prefs.getString('network_profiles');
+      
       if (profilesJson != null) {
         final Map<String, dynamic> decoded = jsonDecode(profilesJson);
         networkProfiles = decoded.map(
@@ -351,9 +394,13 @@ class VPNService {
         );
       }
 
+      // Get profile for current network
       final profile = networkProfiles[networkId];
+      
       if (profile != null) {
         debugPrint('✅ Loaded profile for $currentNetworkName: ${profile.topServers.length} servers');
+        
+        // Restore servers from profile
         fastestServers = profile.topServers.map((config) {
           final cached = serverCache[config];
           if (cached != null) {
@@ -375,8 +422,11 @@ class VPNService {
             );
           }
         }).toList();
+        
+        // Sort and enforce limit
         _sortServersBySuccessRateAndPing();
         _enforceServerLimit();
+        
         serversStreamController.add(List.from(fastestServers));
       } else {
         debugPrint('📝 New network detected: $currentNetworkName - creating profile...');
@@ -387,6 +437,7 @@ class VPNService {
           knownGoodServers: [],
           lastUsed: DateTime.now(),
         );
+        
         // DON'T clear display if VPN is connected
         if (!isConnected) {
           fastestServers.clear();
@@ -402,11 +453,15 @@ class VPNService {
 
   static Future<void> _saveCurrentNetworkProfile() async {
     if (currentNetworkId == null || currentNetworkId == 'none') return;
+
     try {
+      // Sort before saving
       _sortServersBySuccessRateAndPing();
       _enforceServerLimit();
-
+      
+      // Update current profile
       final currentConfigs = fastestServers.map((s) => s.config).toList();
+      
       networkProfiles[currentNetworkId!] = NetworkProfile(
         networkId: currentNetworkId!,
         networkName: currentNetworkName ?? 'Unknown',
@@ -415,12 +470,13 @@ class VPNService {
         lastUsed: DateTime.now(),
       );
 
+      // Save all profiles
       final prefs = await SharedPreferences.getInstance();
       final encoded = jsonEncode(
         networkProfiles.map((key, value) => MapEntry(key, value.toJson())),
       );
       await prefs.setString('network_profiles', encoded);
-
+      
       debugPrint('💾 Saved profile for $currentNetworkName: ${currentConfigs.length} servers');
     } catch (e) {
       debugPrint('❌ Save network profile error: $e');
@@ -428,6 +484,7 @@ class VPNService {
   }
 
   static List<String> _getKnownGoodForNetwork(String networkId) {
+    // Get servers that have good success rate on this network
     return serverCache.entries
         .where((e) => e.value.getNetworkSuccessRate(networkId) > 0.6)
         .map((e) => e.key)
@@ -462,6 +519,7 @@ class VPNService {
   }
 
   static void resumeAutoScan() {
+    // Check if we need to refresh subscription (> 1 hour since last refresh)
     if (_lastSubscriptionRefresh != null) {
       final elapsed = DateTime.now().difference(_lastSubscriptionRefresh!);
       if (elapsed.inMinutes >= 60 && currentSubscriptionLink != null) {
@@ -469,6 +527,8 @@ class VPNService {
         unawaited(_refreshSubscription());
       }
     }
+
+    // ALWAYS resume auto-scan if not connected (removed server count check)
     if (!isConnected &&
         currentSubscriptionLink != null &&
         !_isBackgroundScanning &&
@@ -491,12 +551,15 @@ class VPNService {
       await _loadCache();
       await _loadStats();
       await _loadScannedServers();
+      
+      // Initialize network detection
       await _initNetworkDetection();
 
       final prefs = await SharedPreferences.getInstance();
       currentSubscriptionLink = prefs.getString('subscription_link');
       lastGoodServer = prefs.getString('last_good_server');
-
+      
+      // Load network-specific scan index
       if (currentNetworkId != null && currentNetworkId != 'none') {
         _lastScannedIndex = prefs.getInt('last_scanned_index_$currentNetworkId') ?? 0;
       } else {
@@ -505,8 +568,10 @@ class VPNService {
 
       debugPrint('🔵 Init complete. Network: $currentNetworkName');
 
+      // Start hourly subscription refresh timer
       _startSubscriptionRefresh();
 
+      // FIX: ALWAYS start auto-scan if not connected (removed server count check)
       if (currentSubscriptionLink != null &&
           currentSubscriptionLink!.isNotEmpty &&
           !isConnected &&
@@ -524,11 +589,14 @@ class VPNService {
   // ========================= SUBSCRIPTION REFRESH =========================
   static void _startSubscriptionRefresh() {
     _subscriptionRefreshTimer?.cancel();
+    
     if (currentSubscriptionLink == null || currentSubscriptionLink!.isEmpty) {
       debugPrint('🔵 No subscription link, skipping refresh timer');
       return;
     }
+
     debugPrint('🔵 Starting hourly subscription refresh timer');
+    
     _subscriptionRefreshTimer = Timer.periodic(const Duration(hours: 1), (timer) async {
       if (currentSubscriptionLink != null && currentSubscriptionLink!.isNotEmpty) {
         debugPrint('⏰ Hourly subscription refresh triggered');
@@ -542,16 +610,22 @@ class VPNService {
       debugPrint('⚠️ No subscription link to refresh');
       return;
     }
+
     try {
       debugPrint('🔵 Refreshing subscription...');
+      
+      // Store previous config set for diff
       _previousConfigSet = configServers.toSet();
 
+      // Fetch new subscription
       final valid = await validateSubscription();
+      
       if (!valid) {
         debugPrint('⚠️ Subscription refresh: validation failed');
         return;
       }
 
+      // Check for subscription expiry (≤ 3 servers = expired)
       if (configServers.length <= 3) {
         debugPrint('🚨 SUBSCRIPTION EXPIRED! Only ${configServers.length} servers found');
         await _handleSubscriptionExpiry();
@@ -561,6 +635,7 @@ class VPNService {
       _lastSubscriptionRefresh = DateTime.now();
       debugPrint('✅ Subscription refreshed: ${configServers.length} servers');
 
+      // Compute diff: newly added and removed
       final newConfigSet = configServers.toSet();
       final newlyAdded = newConfigSet.difference(_previousConfigSet);
       final removed = _previousConfigSet.difference(newConfigSet);
@@ -568,6 +643,8 @@ class VPNService {
       if (newlyAdded.isNotEmpty) {
         debugPrint('🆕 Found ${newlyAdded.length} newly-added servers');
         _priorityNew.addAll(newlyAdded);
+
+        // Quick verify pass for newly-added servers (if not connected and app active)
         if (!isConnected && !_isBackgroundScanning && fastestServers.length < MAX_DISPLAY_SERVERS) {
           debugPrint('🔍 Quick verify pass for ${newlyAdded.length} new servers...');
           unawaited(_verifyNewServers(newlyAdded.toList()));
@@ -578,7 +655,9 @@ class VPNService {
         debugPrint('📤 ${removed.length} servers removed from subscription (keeping working ones)');
       }
 
+      // Run pruning pass
       await _pruneStaleServers();
+
     } catch (e) {
       debugPrint('❌ Subscription refresh error: $e');
     }
@@ -586,6 +665,8 @@ class VPNService {
 
   static Future<void> _handleSubscriptionExpiry() async {
     isSubscriptionExpired = true;
+    
+    // Disconnect if connected
     if (isConnected) {
       debugPrint('🔌 Disconnecting due to subscription expiry...');
       _isVpnStateChanging = true;
@@ -593,24 +674,35 @@ class VPNService {
       _isVpnStateChanging = false;
     }
 
+    // Clear all server data
     configServers.clear();
     fastestServers.clear();
     serverCache.clear();
     scannedServers.clear();
     _priorityNew.clear();
     _previousConfigSet.clear();
+    
+    // Clear ALL network profiles
     networkProfiles.clear();
 
+    // Save cleared state
     await _saveCache();
     await _saveCurrentNetworkProfile();
+    
+    // Update UI
     serversStreamController.add([]);
+    
+    // Notify UI to show message
     subscriptionExpiredController.add('Your subscription has expired. Please purchase a new subscription.');
+    
     debugPrint('🚨 All server data cleared due to subscription expiry');
   }
 
   static Future<void> _verifyNewServers(List<String> newServers) async {
     if (newServers.isEmpty || currentNetworkId == null || currentNetworkId == 'none') return;
+
     try {
+      // TCP prefilter for both WiFi and Mobile (same treatment)
       final tcpOk = await _tcpPrefilterConfigs(
         newServers,
         timeout: tcpFastTimeout,
@@ -619,8 +711,11 @@ class VPNService {
       );
       debugPrint('✅ New servers TCP prefilter: ${tcpOk.length}/${newServers.length} passed');
       final toVerify = tcpOk.take(5).toList();
+
+      // Verify survivors (limit to 5 to avoid blocking too long)
       for (final config in toVerify) {
         if (isConnected || fastestServers.length >= MAX_DISPLAY_SERVERS) break;
+
         final result = await _testServerWithPing(config, timeout: bgVerifyTimeout);
         if (result != null && !isConnected && fastestServers.length < MAX_DISPLAY_SERVERS) {
           if (!fastestServers.any((s) => s.config == result.config)) {
@@ -640,21 +735,30 @@ class VPNService {
 
   static Future<void> _pruneStaleServers() async {
     if (currentNetworkId == null || currentNetworkId == 'none') return;
+
     try {
       debugPrint('🧹 Running stale server pruning for network $currentNetworkName...');
+
       final now = DateTime.now();
       final staleThreshold = now.subtract(const Duration(hours: 48));
       final failureThreshold = 5;
+
       int prunedCount = 0;
+
       final toPrune = <String>[];
 
       for (final entry in serverCache.entries) {
         final config = entry.key;
         final cache = entry.value;
+
+        // Never prune currently connected server
         if (config == currentConnectedConfig) continue;
 
+        // Network-specific pruning
         final networkFailures = cache.getNetworkFailures(currentNetworkId!);
         final networkSuccessRate = cache.getNetworkSuccessRate(currentNetworkId!);
+        
+        // Prune if: high failures on THIS network AND never connected AND not tested recently
         if (networkFailures >= failureThreshold &&
             networkSuccessRate < 0.2 &&
             cache.lastTested.isBefore(staleThreshold)) {
@@ -663,6 +767,7 @@ class VPNService {
       }
 
       for (final config in toPrune) {
+        // Remove from current network's display
         fastestServers.removeWhere((s) => s.config == config);
         prunedCount++;
       }
@@ -694,7 +799,7 @@ class VPNService {
     _cancelAutoScan = false;
 
     if (resumeFromIndex == 0) {
-      await Future.delayed(const Duration(milliseconds: 300));
+      await Future.delayed(const Duration(milliseconds: 400));
     }
 
     if (isConnected) {
@@ -719,7 +824,7 @@ class VPNService {
 
       final prioritized = _prioritizeServers();
 
-      // Reset index if beyond list length
+      // Check if resumeFromIndex is beyond list length
       if (resumeFromIndex >= prioritized.length) {
         debugPrint('🔄 Resume index ($resumeFromIndex) >= total servers (${prioritized.length}), resetting to 0');
         resumeFromIndex = 0;
@@ -727,6 +832,7 @@ class VPNService {
         await _saveProgress();
       }
 
+      // Use TCP prefilter + getServerDelay for BOTH WiFi and Mobile in background
       final remaining = prioritized.sublist(resumeFromIndex);
       debugPrint('⚡ TCP prefiltering ${remaining.length} servers with concurrency $tcpFastConcurrency...');
       final toTest = await _tcpPrefilterConfigs(
@@ -737,13 +843,14 @@ class VPNService {
       );
       debugPrint('✅ TCP prefilter survivors: ${toTest.length}');
 
-      // Verify survivors sequentially, continue even after MAX_DISPLAY_SERVERS
+      // Stage B: Verify survivors sequentially, continue even after MAX_DISPLAY_SERVERS
       for (int i = 0; i < toTest.length; i++) {
         if ((resumeFromIndex + i) % 5 == 0) {
           _lastScannedIndex = resumeFromIndex + i;
           await _saveProgress();
         }
 
+        // ONLY stop if user connects or cancels
         if (isConnected || _cancelAutoScan) {
           if (isConnected) debugPrint('🛑 Auto-scan stopped: User connected');
           if (_cancelAutoScan) debugPrint('🛑 Auto-scan cancelled');
@@ -753,6 +860,7 @@ class VPNService {
         final config = toTest[i];
         final result = await _testServerWithPing(config, timeout: bgVerifyTimeout);
         if (result != null && !isConnected) {
+          // Only add to display if < MAX_DISPLAY_SERVERS
           if (fastestServers.length < MAX_DISPLAY_SERVERS) {
             if (!fastestServers.any((s) => s.config == result.config)) {
               fastestServers.add(result);
@@ -763,7 +871,7 @@ class VPNService {
               debugPrint('✅ Added to display (${fastestServers.length}/$MAX_DISPLAY_SERVERS): ${result.name}');
             }
           } else {
-            // Replace slower server if this one is better (by successRate, then ping)
+            // Try to replace slower server if this one is better
             final lastServer = fastestServers.last;
             final isBetter = (result.successRate > lastServer.successRate) ||
                              (result.successRate == lastServer.successRate && result.ping < lastServer.ping);
@@ -781,7 +889,7 @@ class VPNService {
         }
       }
 
-      // Loop continuously for improvement
+      // Check if we've reached the end, and loop back for continuous improvement
       if (!isConnected && !_cancelAutoScan) {
         final tested = toTest.length;
         if (tested == 0 || (resumeFromIndex + tested) >= prioritized.length) {
@@ -789,10 +897,11 @@ class VPNService {
           _lastScannedIndex = 0;
           await _saveProgress();
           _isBackgroundScanning = false;
-          await Future.delayed(const Duration(milliseconds: 400));
+          await Future.delayed(const Duration(milliseconds: 500));
           unawaited(_autoScanServers(resumeFromIndex: 0));
           return;
         }
+
         await _saveCurrentNetworkProfile();
         debugPrint('✅ Auto-scan segment completed for $currentNetworkName');
       }
@@ -820,21 +929,23 @@ class VPNService {
     _healthCheckTimer = Timer.periodic(const Duration(seconds: 4), (timer) async {
       if (isConnected && !_isManualDisconnect) {
         try {
+          // Check 1: Server delay
           final delay = await v2ray.getConnectedServerDelay();
+          
+          // Check 2: Traffic monitoring (no data received for 15 seconds)
           final now = DateTime.now();
           final lastData = _lastDataReceived ?? now;
           final noDataDuration = now.difference(lastData);
-
-          // Fallback to connectivity state
-          final net = await Connectivity().checkConnectivity();
-
-          if (delay == -1 || delay > 5000 || noDataDuration.inSeconds > 8 || net == ConnectivityResult.none) {
-            debugPrint('⚠️ Health check unhealthy (delay=$delay, frozen=${noDataDuration.inSeconds}s, net=$net) → reconnecting...');
+          
+          if (delay == -1 || delay > 5000) {
+            debugPrint('⚠️ Connection unhealthy (delay: ${delay}ms), reconnecting...');
+            _handleDisconnect();
+          } else if (noDataDuration.inSeconds > 15) {
+            debugPrint('⚠️ No traffic for ${noDataDuration.inSeconds}s (frozen connection), reconnecting...');
             _handleDisconnect();
           }
         } catch (e) {
-          debugPrint('❌ Health check error: $e → treating as unhealthy');
-          _handleDisconnect();
+          debugPrint('❌ Health check error: $e');
         }
       }
     });
@@ -991,14 +1102,14 @@ class VPNService {
             _lastScannedIndex = 0;
             await prefs.setInt('last_scanned_index_$currentNetworkId', 0);
           }
-
+          
           // Initialize previous config set
           _previousConfigSet = configServers.toSet();
           _lastSubscriptionRefresh = DateTime.now();
-
+          
           // Start refresh timer
           _startSubscriptionRefresh();
-
+          
           if (!isConnected && currentNetworkId != 'none') {
             debugPrint('🔵 New subscription validated, starting auto-scan...');
             unawaited(_autoScanServers());
@@ -1057,23 +1168,27 @@ class VPNService {
 
   // ========================= UNIFIED CONNECT FLOW (DIRECT CONNECTION FIRST) =========================
   static Future<Map<String, dynamic>> _unifiedConnectFlow(bool connectImmediately) async {
-    debugPrint('🔵 Using DIRECT connect flow for $currentNetworkName (skip getServerDelay for displayed/universal/known-good)');
+    debugPrint('🔵 Using DIRECT connect flow for $currentNetworkName (skip getServerDelay for displayed/universal)');
 
     // Step 0: Try displayed servers via DIRECT CONNECTION (sorted by success rate)
     if (fastestServers.isNotEmpty) {
       debugPrint('🔵 Trying ${fastestServers.length} displayed servers via DIRECT CONNECTION...');
       for (int i = 0; i < fastestServers.length && !_cancelScan; i++) {
         final server = fastestServers[i];
+
+        // Skip blacklisted
         if (_isServerBlacklisted(server.config)) {
           debugPrint('⏭️ Skipping blacklisted server: ${server.name}');
           continue;
         }
+
         debugPrint('🔵 Attempting DIRECT connection to #${i + 1}: ${server.name} (${(server.successRate * 100).toStringAsFixed(0)}% / ${server.ping}ms)');
         final success = await connect(
           vlessUri: server.config,
           ping: server.ping,
           testOnly: !connectImmediately,
         );
+
         if (success) {
           isScanning = false;
           await _saveCurrentNetworkProfile();
@@ -1178,7 +1293,7 @@ class VPNService {
 
     // Step 3: Scan new servers quickly with getServerDelay to find a candidate, then connect
     debugPrint('🔵 Scanning for new servers (fast test) to pick a candidate...');
-    final prioritized = _prioritizeServersForManualConnect(); // deterministic order
+    final prioritized = _prioritizeServersForManualConnect();  // deterministic order
     for (var config in prioritized) {
       if (_cancelScan || isConnected) break;
       if (_isServerBlacklisted(config)) continue;
@@ -1579,8 +1694,8 @@ class VPNService {
 
   // ========================= CONNECT / DISCONNECT =========================
   static Future<bool> connect({
-    required String vlessUri,
-    int? ping,
+    required String vlessUri, 
+    int? ping, 
     bool retryWithoutDoH = true,
     bool testOnly = false,
   }) async {
@@ -1603,13 +1718,14 @@ class VPNService {
       _isManualDisconnect = false;
       _isVpnStateChanging = true;
 
+      // Set testing flag if testOnly to prevent false CONNECTED status
       if (testOnly) {
         _isTesting = true;
       }
 
       final parser = V2ray.parseFromURL(vlessUri);
       var config = parser.getFullConfiguration();
-
+      
       config = _ensureDnsAndIPv4(config, useDoH: false);
 
       if (await v2ray.requestPermission()) {
@@ -1622,6 +1738,7 @@ class VPNService {
           );
 
           await Future.delayed(const Duration(seconds: 2));
+          
           final delay = await v2ray.getConnectedServerDelay()
               .timeout(const Duration(seconds: 5));
 
@@ -1640,6 +1757,7 @@ class VPNService {
           currentConnectedConfig = vlessUri;
           currentConnectedPing = ping;
 
+          // Initialize traffic monitoring
           _lastDataReceived = DateTime.now();
           _lastDownloadBytes = 0;
 
@@ -1698,18 +1816,18 @@ class VPNService {
           _isVpnStateChanging = false;
           debugPrint('✅ Connected successfully on $currentNetworkName');
           return true;
-
+          
         } catch (e) {
           debugPrint('⚠️ Direct DNS connection failed: $e');
-
+          
           if (retryWithoutDoH && !testOnly) {
             debugPrint('🔄 Retrying with DoH...');
             await v2ray.stopV2Ray();
             await Future.delayed(const Duration(milliseconds: 500));
-
+            
             config = parser.getFullConfiguration();
             config = _ensureDnsAndIPv4(config, useDoH: true);
-
+            
             await v2ray.startV2Ray(
               remark: parser.remark,
               config: config,
@@ -1720,7 +1838,7 @@ class VPNService {
             await Future.delayed(const Duration(seconds: 2));
             final delay = await v2ray.getConnectedServerDelay()
                 .timeout(const Duration(seconds: 5));
-
+            
             if (delay != -1 && delay < 8000) {
               if (testOnly) {
                 await v2ray.stopV2Ray();
@@ -1733,6 +1851,7 @@ class VPNService {
               currentConnectedConfig = vlessUri;
               currentConnectedPing = ping;
 
+              // Initialize traffic monitoring
               _lastDataReceived = DateTime.now();
               _lastDownloadBytes = 0;
 
@@ -1746,11 +1865,10 @@ class VPNService {
               return true;
             }
           }
-
+          
           throw e;
         }
       }
-
       _isTesting = false;
       _isVpnStateChanging = false;
       return false;
@@ -1845,9 +1963,7 @@ class VPNService {
       // Save current network profile before potential auto-scan
       await _saveCurrentNetworkProfile();
 
-      if (currentSubscriptionLink != null &&
-          !isSubscriptionExpired &&
-          currentNetworkId != 'none') {
+      if (currentSubscriptionLink != null && !isSubscriptionExpired && currentNetworkId != 'none') {
         debugPrint('🔵 Disconnected, resuming auto-scan for more/better servers...');
         await Future.delayed(const Duration(milliseconds: 400));
         unawaited(_autoScanServers(resumeFromIndex: _lastScannedIndex));
@@ -1896,14 +2012,14 @@ class ConnectionStats {
   });
 
   Map<String, dynamic> toJson() => {
-        'totalDownload': totalDownload,
-        'totalUpload': totalUpload,
-        'date': date.toIso8601String(),
-      };
+    'totalDownload': totalDownload,
+    'totalUpload': totalUpload,
+    'date': date.toIso8601String(),
+  };
 
   factory ConnectionStats.fromJson(Map<String, dynamic> json) => ConnectionStats(
-        totalDownload: json['totalDownload'] ?? 0,
-        totalUpload: json['totalUpload'] ?? 0,
-        date: DateTime.parse(json['date']),
-      );
+    totalDownload: json['totalDownload'] ?? 0,
+    totalUpload: json['totalUpload'] ?? 0,
+    date: DateTime.parse(json['date']),
+  );
 }
