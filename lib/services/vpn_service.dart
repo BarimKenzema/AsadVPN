@@ -42,11 +42,11 @@ class VPNService {
   static final V2ray v2ray = V2ray(onStatusChanged: _updateConnectionState);
 
   // Timeouts and concurrency knobs
-  static const Duration userTestTimeout = Duration(milliseconds: 1500);  // ← CHANGED to 1.5 seconds
+  static const Duration userTestTimeout = Duration(milliseconds: 1500);
   static const Duration wifiConnectTimeout = Duration(seconds: 6);
   static const Duration bgVerifyTimeout = Duration(seconds: 2);
   static const Duration tcpFastTimeout = Duration(milliseconds: 600);
-  static const int tcpFastConcurrency = 111;  // ← CHANGED to 111
+  static const int tcpFastConcurrency = 111;
   
   // SERVER LIMITS - ENFORCED!
   static const int MAX_DISPLAY_SERVERS = 11;  // Hard limit for display
@@ -75,6 +75,12 @@ class VPNService {
 
   // Testing flag to prevent false CONNECTED status during tests
   static bool _isTesting = false;
+
+  // Auto-reconnect tracking
+  static int _reconnectAttempts = 0;
+  static DateTime? _lastDataReceived;
+  static int _lastDownloadBytes = 0;
+  static Map<String, DateTime> _serverBlacklist = {};  // Temporarily blacklist dead servers
 
   // Caching (now network-aware)
   static Map<String, ServerCache> serverCache = {};
@@ -147,11 +153,29 @@ class VPNService {
     return universal;
   }
 
+  // ========================= HELPER: CHECK BLACKLIST =========================
+  static bool _isServerBlacklisted(String config) {
+    final blacklistedUntil = _serverBlacklist[config];
+    if (blacklistedUntil == null) return false;
+    
+    if (DateTime.now().isBefore(blacklistedUntil)) {
+      return true;  // Still blacklisted
+    } else {
+      _serverBlacklist.remove(config);  // Blacklist expired
+      return false;
+    }
+  }
+
+  static void _blacklistServer(String config, {Duration duration = const Duration(minutes: 5)}) {
+    _serverBlacklist[config] = DateTime.now().add(duration);
+    debugPrint('⛔ Blacklisted server for ${duration.inMinutes} minutes');
+  }
+
   // ========================= HELPER: ENFORCE SERVER LIMIT =========================
   static void _enforceServerLimit() {
     if (fastestServers.length > MAX_DISPLAY_SERVERS) {
       debugPrint('⚠️ Server limit exceeded: ${fastestServers.length} > $MAX_DISPLAY_SERVERS, trimming...');
-      _sortServersBySuccessRateAndPing();  // ← CHANGED: Sort before trimming
+      _sortServersBySuccessRateAndPing();
       fastestServers = fastestServers.take(MAX_DISPLAY_SERVERS).toList();
       debugPrint('✅ Trimmed to $MAX_DISPLAY_SERVERS servers');
     }
@@ -182,6 +206,15 @@ class VPNService {
     if (newIsConnected) {
       sessionDownload = status.download;
       sessionUpload = status.upload;
+      
+      // Track data flow for traffic monitoring
+      if (status.download > _lastDownloadBytes) {
+        _lastDataReceived = DateTime.now();
+        _lastDownloadBytes = status.download;
+      }
+      
+      // Reset reconnect attempts on successful connection
+      _reconnectAttempts = 0;
     }
 
     statusStreamController.add(status);
@@ -205,15 +238,47 @@ class VPNService {
     }
   }
 
+  // ========================= IMPROVED AUTO-RECONNECT =========================
   static void _handleDisconnect() {
-    debugPrint('⚠️ Unexpected disconnect, attempting reconnect...');
+    debugPrint('⚠️ Unexpected disconnect, attempting smart reconnect...');
     _lastConnectionTime = null;
+    
     Future.delayed(const Duration(seconds: 2), () async {
       if (!isConnected && fastestServers.isNotEmpty && !_isManualDisconnect) {
-        await connect(
-          vlessUri: fastestServers.first.config,
-          ping: fastestServers.first.ping,
-        );
+        // Try top 4 servers (skipping blacklisted ones)
+        final maxAttempts = min(4, fastestServers.length);
+        
+        for (int i = 0; i < maxAttempts; i++) {
+          final server = fastestServers[i];
+          
+          // Skip blacklisted servers
+          if (_isServerBlacklisted(server.config)) {
+            debugPrint('⏭️ Skipping blacklisted server: ${server.name}');
+            continue;
+          }
+          
+          debugPrint('🔄 Reconnect attempt ${i + 1}/$maxAttempts: ${server.name}');
+          
+          final success = await connect(
+            vlessUri: server.config,
+            ping: server.ping,
+          );
+          
+          if (success) {
+            debugPrint('✅ Reconnected to: ${server.name}');
+            _reconnectAttempts = 0;
+            return;
+          } else {
+            // Blacklist failed server temporarily
+            _blacklistServer(server.config);
+          }
+          
+          await Future.delayed(const Duration(seconds: 1));
+        }
+        
+        // All attempts failed
+        debugPrint('❌ All $maxAttempts reconnect attempts failed');
+        _reconnectAttempts++;
       }
     });
   }
@@ -281,6 +346,9 @@ class VPNService {
     final previousNetworkId = currentNetworkId;
     currentNetworkId = newNetworkId;
     currentNetworkName = newNetworkName;
+    
+    // Clear blacklist on network change
+    _serverBlacklist.clear();
     
     // Notify UI
     networkChangeController.add(newNetworkName);
@@ -420,7 +488,7 @@ class VPNService {
     return serverCache.entries
         .where((e) => e.value.getNetworkSuccessRate(networkId) > 0.6)
         .map((e) => e.key)
-        .take(44)  // ← CHANGED from 30 to 44
+        .take(44)
         .toList();
   }
 
@@ -491,7 +559,7 @@ class VPNService {
       currentSubscriptionLink = prefs.getString('subscription_link');
       lastGoodServer = prefs.getString('last_good_server');
       
-      // ← CHANGED: Load network-specific scan index
+      // Load network-specific scan index
       if (currentNetworkId != null && currentNetworkId != 'none') {
         _lastScannedIndex = prefs.getInt('last_scanned_index_$currentNetworkId') ?? 0;
       } else {
@@ -757,7 +825,7 @@ class VPNService {
 
       final prioritized = _prioritizeServers();
 
-      // ← FIX: Check if resumeFromIndex is beyond list length
+      // Check if resumeFromIndex is beyond list length
       if (resumeFromIndex >= prioritized.length) {
         debugPrint('🔄 Resume index ($resumeFromIndex) >= total servers (${prioritized.length}), resetting to 0');
         resumeFromIndex = 0;
@@ -801,7 +869,7 @@ class VPNService {
           if (fastestServers.length < MAX_DISPLAY_SERVERS) {
             if (!fastestServers.any((s) => s.config == result.config)) {
               fastestServers.add(result);
-              _sortServersBySuccessRateAndPing();  // ← CHANGED: Sort after adding
+              _sortServersBySuccessRateAndPing();
               _enforceServerLimit();
               await _saveCurrentNetworkProfile();
               serversStreamController.add(List.from(fastestServers));
@@ -809,7 +877,6 @@ class VPNService {
             }
           } else {
             // Try to replace slower server if this one is better
-            // ← CHANGED: Compare by success rate first, then ping
             final lastServer = fastestServers.last;
             final isBetter = (result.successRate > lastServer.successRate) ||
                              (result.successRate == lastServer.successRate && result.ping < lastServer.ping);
@@ -828,7 +895,7 @@ class VPNService {
         }
       }
 
-      // ← FIX: Check if we've reached the end, and loop back if needed
+      // Check if we've reached the end, and loop back if needed
       if (!isConnected && !_cancelAutoScan) {
         final finalIndex = resumeFromIndex + toTest.length;
         
@@ -870,21 +937,32 @@ class VPNService {
       if (currentNetworkId == null || currentNetworkId == 'none') return;
       
       final prefs = await SharedPreferences.getInstance();
-      // ← CHANGED: Save network-specific index
+      // Save network-specific index
       await prefs.setInt('last_scanned_index_$currentNetworkId', _lastScannedIndex);
     } catch (e) {
       debugPrint('❌ Save progress error: $e');
     }
   }
 
+  // ========================= IMPROVED HEALTH CHECK (4 SECONDS) =========================
   static void _startHealthCheck() {
     _healthCheckTimer?.cancel();
-    _healthCheckTimer = Timer.periodic(const Duration(seconds: 10), (timer) async {
+    _healthCheckTimer = Timer.periodic(const Duration(seconds: 4), (timer) async {
       if (isConnected && !_isManualDisconnect) {
         try {
+          // Check 1: Server delay
           final delay = await v2ray.getConnectedServerDelay();
+          
+          // Check 2: Traffic monitoring (no data received for 15 seconds)
+          final now = DateTime.now();
+          final lastData = _lastDataReceived ?? now;
+          final noDataDuration = now.difference(lastData);
+          
           if (delay == -1 || delay > 5000) {
-            debugPrint('⚠️ Connection unhealthy (${delay}ms), reconnecting...');
+            debugPrint('⚠️ Connection unhealthy (delay: ${delay}ms), reconnecting...');
+            _handleDisconnect();
+          } else if (noDataDuration.inSeconds > 15) {
+            debugPrint('⚠️ No traffic for ${noDataDuration.inSeconds}s (frozen connection), reconnecting...');
             _handleDisconnect();
           }
         } catch (e) {
@@ -1041,7 +1119,7 @@ class VPNService {
             return false;
           }
 
-          // ← CHANGED: Reset network-specific index
+          // Reset network-specific index
           if (currentNetworkId != null && currentNetworkId != 'none') {
             _lastScannedIndex = 0;
             await prefs.setInt('last_scanned_index_$currentNetworkId', 0);
@@ -1113,26 +1191,33 @@ class VPNService {
     return await _unifiedConnectFlow(connectImmediately);
   }
 
-  // ========================= UNIFIED CONNECT FLOW =========================
+  // ========================= UNIFIED CONNECT FLOW (NO SHUFFLE!) =========================
   static Future<Map<String, dynamic>> _unifiedConnectFlow(bool connectImmediately) async {
     debugPrint('🔵 Using unified connect flow for $currentNetworkName');
 
-    // Step 0: Try displayed servers first (already sorted by success rate → ping)
+    // Step 0: Try displayed servers first (STRICT ORDER - NO SHUFFLE!)
     if (fastestServers.isNotEmpty) {
-      debugPrint('🔵 Trying ${fastestServers.length} displayed servers (sorted by success rate)...');
+      debugPrint('🔵 Trying ${fastestServers.length} displayed servers IN ORDER (sorted by success rate)...');
 
       for (int i = 0; i < fastestServers.length && !_cancelScan; i++) {
-        debugPrint('🔵 Testing displayed server ${i + 1}/${fastestServers.length}: ${fastestServers[i].name} (${(fastestServers[i].successRate * 100).toStringAsFixed(0)}% / ${fastestServers[i].ping}ms)...');
-        final result =
-            await _testServerWithPing(fastestServers[i].config, timeout: userTestTimeout)
-                .timeout(userTestTimeout, onTimeout: () => null);
+        final server = fastestServers[i];
+        
+        // Skip blacklisted servers
+        if (_isServerBlacklisted(server.config)) {
+          debugPrint('⏭️ Skipping blacklisted server: ${server.name}');
+          continue;
+        }
+        
+        debugPrint('🔵 Testing server #${i + 1}/${fastestServers.length}: ${server.name} (${(server.successRate * 100).toStringAsFixed(0)}% / ${server.ping}ms)...');
+        
+        final result = await _testServerWithPing(server.config, timeout: userTestTimeout)
+            .timeout(userTestTimeout, onTimeout: () => null);
 
         if (result != null) {
-          debugPrint('✅ Displayed server working: ${result.name} (${result.ping}ms)');
+          debugPrint('✅ Server working: ${result.name} (${result.ping}ms)');
           if (connectImmediately) {
             isScanning = false;
-            final index =
-                fastestServers.indexWhere((s) => s.config == result.config);
+            final index = fastestServers.indexWhere((s) => s.config == result.config);
             if (index != -1) {
               fastestServers[index] = result;
               _sortServersBySuccessRateAndPing();
@@ -1141,12 +1226,12 @@ class VPNService {
             }
             await _saveCurrentNetworkProfile();
             await connect(vlessUri: result.config, ping: result.ping);
-            debugPrint('🔵 Connected to displayed server');
+            debugPrint('🔵 Connected to displayed server #${i + 1}');
             return {'success': true, 'server': result.config, 'ping': result.ping};
           }
         } else {
-          debugPrint('⚠️ Server failed: ${fastestServers[i].name}');
-          _recordFailure(fastestServers[i].config);
+          debugPrint('⚠️ Server failed test: ${server.name}');
+          _recordFailure(server.config);
         }
       }
       if (_cancelScan) {
@@ -1161,6 +1246,8 @@ class VPNService {
     if (universal.isNotEmpty) {
       debugPrint('🌍 Trying ${universal.length} universal servers...');
       for (int i = 0; i < universal.length && !_cancelScan; i++) {
+        if (_isServerBlacklisted(universal[i])) continue;
+        
         debugPrint('🔵 Testing universal server ${i + 1}/${universal.length}...');
         
         final result = await _testServerWithPing(universal[i], timeout: userTestTimeout)
@@ -1191,8 +1278,10 @@ class VPNService {
         debugPrint('🔵 Fallback: testing known-good pool (${fallback.length})...');
         for (int i = 0; i < min(MAX_DISPLAY_SERVERS, fallback.length) && !_cancelScan && !isConnected; i++) {
           final cfg = fallback[i];
-          final result =
-              await _testServerWithPing(cfg, timeout: userTestTimeout).timeout(userTestTimeout, onTimeout: () => null);
+          if (_isServerBlacklisted(cfg)) continue;
+          
+          final result = await _testServerWithPing(cfg, timeout: userTestTimeout)
+              .timeout(userTestTimeout, onTimeout: () => null);
           if (result != null) {
             isScanning = false;
             if (!fastestServers.any((s) => s.config == result.config)) {
@@ -1212,12 +1301,13 @@ class VPNService {
       }
     }
 
-    // Step 3: Scan new servers
-    debugPrint('🔵 Scanning for new servers...');
-    final prioritized = _prioritizeServers();
+    // Step 3: Scan new servers (NO SHUFFLE for manual connect!)
+    debugPrint('🔵 Scanning for new servers (strict priority order)...');
+    final prioritized = _prioritizeServersForManualConnect();  // ← New method without shuffle
     
     for (var config in prioritized) {
       if (_cancelScan || isConnected) break;
+      if (_isServerBlacklisted(config)) continue;
       
       debugPrint('🔵 Testing server...');
       final result = await _testServerWithPing(config, timeout: userTestTimeout)
@@ -1253,7 +1343,7 @@ class VPNService {
     return {'success': false, 'error': 'No working servers found'};
   }
 
-  // ========================= PRIORITY =========================
+  // ========================= PRIORITY (FOR AUTO-SCAN - WITH SHUFFLE) =========================
   static List<String> _prioritizeServers() {
     final Set<String> processed = {};
     final List<String> result = [];
@@ -1302,13 +1392,76 @@ class VPNService {
       processed.addAll(goodCached);
     }
 
-    // Priority 5: Remaining (newest first, then shuffled)
-    // ← CHANGED: Removed global fallback that was breaking index order
+    // Priority 5: Remaining (newest first, then shuffled - OK for background scan)
     final remaining = configServers
         .where((c) => !processed.contains(c) && !scannedServers.contains(c))
         .toList();
 
     final reversed = remaining.reversed.toList()..shuffle(Random());
+    result.addAll(reversed);
+
+    return result;
+  }
+
+  // ========================= PRIORITY (FOR MANUAL CONNECT - NO SHUFFLE!) =========================
+  static List<String> _prioritizeServersForManualConnect() {
+    final Set<String> processed = {};
+    final List<String> result = [];
+
+    // Priority 1: Universal servers
+    final universal = _getUniversalServers();
+    for (var config in universal) {
+      if (configServers.contains(config) && !processed.contains(config)) {
+        result.add(config);
+        processed.add(config);
+      }
+    }
+
+    // Priority 2: Newly-added servers
+    for (var config in _priorityNew) {
+      if (configServers.contains(config) && !processed.contains(config)) {
+        result.add(config);
+        processed.add(config);
+      }
+    }
+
+    // Priority 3: Network-specific top servers
+    if (currentNetworkId != null && currentNetworkId != 'none') {
+      final profile = networkProfiles[currentNetworkId!];
+      if (profile != null && profile.topServers.isNotEmpty) {
+        for (var config in profile.topServers) {
+          if (configServers.contains(config) && !processed.contains(config)) {
+            result.add(config);
+            processed.add(config);
+          }
+        }
+      }
+    }
+
+    // Priority 4: Network-specific cached good servers (sorted by success rate)
+    if (currentNetworkId != null && currentNetworkId != 'none') {
+      final goodCached = serverCache.entries
+          .where((e) =>
+              e.value.getNetworkSuccessRate(currentNetworkId!) > 0.7 &&
+              configServers.contains(e.key) &&
+              !processed.contains(e.key))
+          .map((e) => MapEntry(e.key, e.value.getNetworkSuccessRate(currentNetworkId!)))
+          .toList();
+      
+      // Sort by success rate (descending)
+      goodCached.sort((a, b) => b.value.compareTo(a.value));
+      
+      final goodConfigs = goodCached.map((e) => e.key).toList();
+      result.addAll(goodConfigs);
+      processed.addAll(goodConfigs);
+    }
+
+    // Priority 5: Remaining (newest first - NO SHUFFLE for manual connect!)
+    final remaining = configServers
+        .where((c) => !processed.contains(c))
+        .toList();
+
+    final reversed = remaining.reversed.toList();  // ← NO SHUFFLE!
     result.addAll(reversed);
 
     return result;
@@ -1627,6 +1780,10 @@ class VPNService {
 
           currentConnectedConfig = vlessUri;
           currentConnectedPing = ping;
+          
+          // Initialize traffic monitoring
+          _lastDataReceived = DateTime.now();
+          _lastDownloadBytes = 0;
 
           final existing = serverCache[vlessUri];
           if (existing != null && currentNetworkId != null && currentNetworkId != 'none') {
@@ -1717,6 +1874,10 @@ class VPNService {
 
               currentConnectedConfig = vlessUri;
               currentConnectedPing = ping;
+              
+              // Initialize traffic monitoring
+              _lastDataReceived = DateTime.now();
+              _lastDownloadBytes = 0;
               
               lastGoodServer = vlessUri;
               final prefs = await SharedPreferences.getInstance();
@@ -1843,6 +2004,8 @@ class VPNService {
       sessionDownload = 0;
       sessionUpload = 0;
       _lastConnectionTime = null;
+      _lastDataReceived = null;
+      _lastDownloadBytes = 0;
       connectionStateController.add(false);
     }
   }
