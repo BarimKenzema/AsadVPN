@@ -375,8 +375,8 @@ class VPNService {
       }
       
       _isVpnStateChanging = false;
-    } else if (!isConnected) {
-      // Start auto-scan for new network (ALWAYS, regardless of server count)
+    } else if (!isConnected && fastestServers.length < MAX_DISPLAY_SERVERS) {
+      // Start auto-scan for new network
       debugPrint('🔍 Starting auto-scan for new network...');
       unawaited(_autoScanServers());
     }
@@ -528,8 +528,8 @@ class VPNService {
       }
     }
 
-    // ALWAYS resume auto-scan if not connected (removed server count check)
     if (!isConnected &&
+        fastestServers.length < MAX_DISPLAY_SERVERS &&
         currentSubscriptionLink != null &&
         !_isBackgroundScanning &&
         !isSubscriptionExpired) {
@@ -571,12 +571,13 @@ class VPNService {
       // Start hourly subscription refresh timer
       _startSubscriptionRefresh();
 
-      // FIX: ALWAYS start auto-scan if not connected (removed server count check)
+      // Auto discovery when not connected and fewer than MAX servers in display
       if (currentSubscriptionLink != null &&
           currentSubscriptionLink!.isNotEmpty &&
           !isConnected &&
+          fastestServers.length < MAX_DISPLAY_SERVERS &&
           currentNetworkId != 'none') {
-        debugPrint('🔵 Starting auto-scan (from index $_lastScannedIndex)...');
+        debugPrint('🔵 Starting auto-scan for $MAX_DISPLAY_SERVERS servers (from index $_lastScannedIndex)...');
         unawaited(_autoScanServers(resumeFromIndex: _lastScannedIndex));
       }
 
@@ -1148,7 +1149,7 @@ class VPNService {
     }
   }
 
-  // ========================= CONNECT FLOW (FIXED: SKIP TEST, CONNECT DIRECTLY) =========================
+  // ========================= CONNECT FLOW =========================
   static Future<Map<String, dynamic>> scanAndSelectBestServer({bool connectImmediately = true}) async {
     if (isSubscriptionExpired) {
       return {'success': false, 'error': 'Subscription expired. Please purchase a new subscription.'};
@@ -1190,13 +1191,13 @@ class VPNService {
     return await _unifiedConnectFlow(connectImmediately);
   }
 
-  // ========================= UNIFIED CONNECT FLOW (FIXED: DIRECT CONNECTION) =========================
+  // ========================= UNIFIED CONNECT FLOW (NO SHUFFLE!) =========================
   static Future<Map<String, dynamic>> _unifiedConnectFlow(bool connectImmediately) async {
     debugPrint('🔵 Using unified connect flow for $currentNetworkName');
 
-    // FIX: Try connecting to displayed servers DIRECTLY (skip getServerDelay test)
+    // Step 0: Try displayed servers first (STRICT ORDER - NO SHUFFLE!)
     if (fastestServers.isNotEmpty) {
-      debugPrint('🔵 Trying ${fastestServers.length} displayed servers DIRECTLY (no delay test)...');
+      debugPrint('🔵 Trying ${fastestServers.length} displayed servers IN ORDER (sorted by success rate)...');
 
       for (int i = 0; i < fastestServers.length && !_cancelScan; i++) {
         final server = fastestServers[i];
@@ -1207,24 +1208,32 @@ class VPNService {
           continue;
         }
         
-        debugPrint('🔵 Connecting to server #${i + 1}/${fastestServers.length}: ${server.name} (${(server.successRate * 100).toStringAsFixed(0)}% / ${server.ping}ms)...');
+        debugPrint('🔵 Testing server #${i + 1}/${fastestServers.length}: ${server.name} (${(server.successRate * 100).toStringAsFixed(0)}% / ${server.ping}ms)...');
         
-        // FIX: Connect directly without testing
-        final success = await connect(
-          vlessUri: server.config,
-          ping: server.ping,
-        );
+        final result = await _testServerWithPing(server.config, timeout: userTestTimeout)
+            .timeout(userTestTimeout, onTimeout: () => null);
 
-        if (success) {
-          isScanning = false;
-          debugPrint('✅ Connected to displayed server #${i + 1}: ${server.name}');
-          return {'success': true, 'server': server.config, 'ping': server.ping};
+        if (result != null) {
+          debugPrint('✅ Server working: ${result.name} (${result.ping}ms)');
+          if (connectImmediately) {
+            isScanning = false;
+            final index = fastestServers.indexWhere((s) => s.config == result.config);
+            if (index != -1) {
+              fastestServers[index] = result;
+              _sortServersBySuccessRateAndPing();
+              _enforceServerLimit();
+              serversStreamController.add(List.from(fastestServers));
+            }
+            await _saveCurrentNetworkProfile();
+            await connect(vlessUri: result.config, ping: result.ping);
+            debugPrint('🔵 Connected to displayed server #${i + 1}');
+            return {'success': true, 'server': result.config, 'ping': result.ping};
+          }
         } else {
-          debugPrint('⚠️ Connection failed: ${server.name}');
-          _blacklistServer(server.config, duration: const Duration(minutes: 2));
+          debugPrint('⚠️ Server failed test: ${server.name}');
+          _recordFailure(server.config);
         }
       }
-      
       if (_cancelScan) {
         isScanning = false;
         _cancelScan = false;
@@ -1239,27 +1248,805 @@ class VPNService {
       for (int i = 0; i < universal.length && !_cancelScan; i++) {
         if (_isServerBlacklisted(universal[i])) continue;
         
-        debugPrint('🔵 Connecting to universal server ${i + 1}/${universal.length}...');
+        debugPrint('🔵 Testing universal server ${i + 1}/${universal.length}...');
         
-        final success = await connect(vlessUri: universal[i], ping: null);
+        final result = await _testServerWithPing(universal[i], timeout: userTestTimeout)
+            .timeout(userTestTimeout, onTimeout: () => null);
 
-        if (success) {
+        if (result != null) {
           isScanning = false;
-          // Add to display if not already there
-          if (!fastestServers.any((s) => s.config == universal[i])) {
-            final cached = serverCache[universal[i]];
-            if (cached != null) {
-              fastestServers.add(ServerInfo(
-                config: universal[i],
-                protocol: cached.protocol,
-                ping: cached.lastPing,
-                name: cached.name,
-                successRate: cached.getNetworkSuccessRate(currentNetworkId!),
-              ));
+          if (!fastestServers.any((s) => s.config == result.config)) {
+            fastestServers.add(result);
+            _sortServersBySuccessRateAndPing();
+            _enforceServerLimit();
+            serversStreamController.add(List.from(fastestServers));
+          }
+          await _saveCurrentNetworkProfile();
+          if (connectImmediately) {
+            await connect(vlessUri: result.config, ping: result.ping);
+          }
+          debugPrint('✅ Connected to universal server');
+          return {'success': true, 'server': result.config, 'ping': result.ping};
+        }
+      }
+    }
+
+    // Step 2: Fallback to network's known-good servers
+    if (!isConnected && fastestServers.isEmpty && currentNetworkId != null && currentNetworkId != 'none') {
+      final fallback = _getKnownGoodForNetwork(currentNetworkId!);
+      if (fallback.isNotEmpty) {
+        debugPrint('🔵 Fallback: testing known-good pool (${fallback.length})...');
+        for (int i = 0; i < min(MAX_DISPLAY_SERVERS, fallback.length) && !_cancelScan && !isConnected; i++) {
+          final cfg = fallback[i];
+          if (_isServerBlacklisted(cfg)) continue;
+          
+          final result = await _testServerWithPing(cfg, timeout: userTestTimeout)
+              .timeout(userTestTimeout, onTimeout: () => null);
+          if (result != null) {
+            isScanning = false;
+            if (!fastestServers.any((s) => s.config == result.config)) {
+              fastestServers.add(result);
               _sortServersBySuccessRateAndPing();
               _enforceServerLimit();
               serversStreamController.add(List.from(fastestServers));
             }
+            await _saveCurrentNetworkProfile();
+            if (connectImmediately) {
+              await connect(vlessUri: result.config, ping: result.ping);
+            }
+            debugPrint('🔵 Connected from known-good pool');
+            return {'success': true, 'server': result.config, 'ping': result.ping};
+          }
+        }
+      }
+    }
+
+    // Step 3: Scan new servers (NO SHUFFLE for manual connect!)
+    debugPrint('🔵 Scanning for new servers (strict priority order)...');
+    final prioritized = _prioritizeServersForManualConnect();  // ← New method without shuffle
+    
+    for (var config in prioritized) {
+      if (_cancelScan || isConnected) break;
+      if (_isServerBlacklisted(config)) continue;
+      
+      debugPrint('🔵 Testing server...');
+      final result = await _testServerWithPing(config, timeout: userTestTimeout)
+          .timeout(userTestTimeout, onTimeout: () => null);
+      if (result != null) {
+        debugPrint('✅ Found working server: ${result.name} (${result.ping}ms)');
+        if (connectImmediately) {
+          isScanning = false;
+          if (!fastestServers.any((s) => s.config == result.config)) {
+            fastestServers.add(result);
+            _sortServersBySuccessRateAndPing();
+            _enforceServerLimit();
+            serversStreamController.add(List.from(fastestServers));
           }
           await _saveCurrentNetworkProfile();
-          debugPrint('✅ Connected to universal server
+          await connect(vlessUri: result.config, ping: result.ping);
+          debugPrint('🔵 Connected to new server');
+          return {'success': true, 'server': result.config, 'ping': result.ping};
+        }
+      }
+    }
+
+    isScanning = false;
+    if (_cancelScan) {
+      _cancelScan = false;
+      return {'success': false, 'error': 'Scan cancelled'};
+    }
+    
+    // Trigger background scan
+    debugPrint('⚠️ No servers found, starting background scan...');
+    unawaited(_autoScanServers());
+    
+    return {'success': false, 'error': 'No working servers found'};
+  }
+
+  // ========================= PRIORITY (FOR AUTO-SCAN - WITH SHUFFLE) =========================
+  static List<String> _prioritizeServers() {
+    final Set<String> processed = {};
+    final List<String> result = [];
+
+    // Priority 1: Universal servers (work on 3+ networks)
+    final universal = _getUniversalServers();
+    for (var config in universal) {
+      if (configServers.contains(config) && !processed.contains(config)) {
+        result.add(config);
+        processed.add(config);
+      }
+    }
+
+    // Priority 2: Newly-added servers from subscription refresh
+    for (var config in _priorityNew) {
+      if (configServers.contains(config) && !processed.contains(config)) {
+        result.add(config);
+        processed.add(config);
+      }
+    }
+
+    // Priority 3: Network-specific top servers
+    if (currentNetworkId != null && currentNetworkId != 'none') {
+      final profile = networkProfiles[currentNetworkId!];
+      if (profile != null && profile.topServers.isNotEmpty) {
+        for (var config in profile.topServers) {
+          if (configServers.contains(config) && !processed.contains(config)) {
+            result.add(config);
+            processed.add(config);
+          }
+        }
+      }
+    }
+
+    // Priority 4: Network-specific cached good servers
+    if (currentNetworkId != null && currentNetworkId != 'none') {
+      final goodCached = serverCache.entries
+          .where((e) =>
+              e.value.getNetworkSuccessRate(currentNetworkId!) > 0.7 &&
+              configServers.contains(e.key) &&
+              !scannedServers.contains(e.key))
+          .map((e) => e.key)
+          .where((c) => !processed.contains(c))
+          .toList();
+      result.addAll(goodCached);
+      processed.addAll(goodCached);
+    }
+
+    // Priority 5: Remaining (newest first, then shuffled - OK for background scan)
+    final remaining = configServers
+        .where((c) => !processed.contains(c) && !scannedServers.contains(c))
+        .toList();
+
+    final reversed = remaining.reversed.toList()..shuffle(Random());
+    result.addAll(reversed);
+
+    return result;
+  }
+
+  // ========================= PRIORITY (FOR MANUAL CONNECT - NO SHUFFLE!) =========================
+  static List<String> _prioritizeServersForManualConnect() {
+    final Set<String> processed = {};
+    final List<String> result = [];
+
+    // Priority 1: Universal servers
+    final universal = _getUniversalServers();
+    for (var config in universal) {
+      if (configServers.contains(config) && !processed.contains(config)) {
+        result.add(config);
+        processed.add(config);
+      }
+    }
+
+    // Priority 2: Newly-added servers
+    for (var config in _priorityNew) {
+      if (configServers.contains(config) && !processed.contains(config)) {
+        result.add(config);
+        processed.add(config);
+      }
+    }
+
+    // Priority 3: Network-specific top servers
+    if (currentNetworkId != null && currentNetworkId != 'none') {
+      final profile = networkProfiles[currentNetworkId!];
+      if (profile != null && profile.topServers.isNotEmpty) {
+        for (var config in profile.topServers) {
+          if (configServers.contains(config) && !processed.contains(config)) {
+            result.add(config);
+            processed.add(config);
+          }
+        }
+      }
+    }
+
+    // Priority 4: Network-specific cached good servers (sorted by success rate)
+    if (currentNetworkId != null && currentNetworkId != 'none') {
+      final goodCached = serverCache.entries
+          .where((e) =>
+              e.value.getNetworkSuccessRate(currentNetworkId!) > 0.7 &&
+              configServers.contains(e.key) &&
+              !processed.contains(e.key))
+          .map((e) => MapEntry(e.key, e.value.getNetworkSuccessRate(currentNetworkId!)))
+          .toList();
+      
+      // Sort by success rate (descending)
+      goodCached.sort((a, b) => b.value.compareTo(a.value));
+      
+      final goodConfigs = goodCached.map((e) => e.key).toList();
+      result.addAll(goodConfigs);
+      processed.addAll(goodConfigs);
+    }
+
+    // Priority 5: Remaining (newest first - NO SHUFFLE for manual connect!)
+    final remaining = configServers
+        .where((c) => !processed.contains(c))
+        .toList();
+
+    final reversed = remaining.reversed.toList();  // ← NO SHUFFLE!
+    result.addAll(reversed);
+
+    return result;
+  }
+
+  // ========================= DNS & CONFIG (MINIMAL MODIFICATION) =========================
+  static String _ensureDnsAndIPv4(String config, {bool useDoH = false}) {
+    try {
+      final Map<String, dynamic> json = jsonDecode(config);
+      
+      // Only modify DNS if not already set - preserve original config as much as possible
+      if (json['dns'] == null) {
+        json['dns'] = {};
+        
+        if (useDoH) {
+          json['dns']['servers'] = [
+            'https://1.1.1.1/dns-query',
+            'https://dns.google/dns-query',
+            '1.1.1.1',
+            '8.8.8.8',
+          ];
+        } else {
+          json['dns']['servers'] = [
+            '1.1.1.1',
+            '8.8.8.8',
+            '8.8.4.4',
+          ];
+        }
+      }
+      
+      if (json['routing'] == null) {
+        json['routing'] = {};
+        json['routing']['domainStrategy'] = 'IPIfNonMatch';
+      }
+      
+      return jsonEncode(json);
+    } catch (_) {
+      // If parsing fails, return original config unchanged
+      return config;
+    }
+  }
+
+  // ========================= TESTS =========================
+  static Future<ServerInfo?> _testServerWithPing(String uri, {Duration? timeout}) async {
+    if (currentNetworkId == null || currentNetworkId == 'none') return null;
+
+    try {
+      final parser = V2ray.parseFromURL(uri);
+      var config = parser.getFullConfiguration();
+
+      config = _ensureDnsAndIPv4(config, useDoH: false);
+
+      final effectiveTimeout = timeout ?? userTestTimeout;
+      final delay = await v2ray.getServerDelay(config: config).timeout(
+        effectiveTimeout,
+        onTimeout: () => -1,
+      );
+
+      if (delay != -1 && delay < 8000) {
+        debugPrint('✅ ${parser.remark}: ${delay}ms on $currentNetworkName');
+
+        final existing = serverCache[uri];
+        final currentSuccess = existing?.getNetworkSuccess(currentNetworkId!) ?? 0;
+        final currentFailures = existing?.getNetworkFailures(currentNetworkId!) ?? 0;
+
+        serverCache[uri] = ServerCache(
+          config: uri,
+          name: parser.remark,
+          protocol: _getProtocol(uri),
+          lastPing: delay,
+          lastTested: DateTime.now(),
+          successCount: (existing?.successCount ?? 0) + 1,
+          failureCount: existing?.failureCount ?? 0,
+          lastConnected: existing?.lastConnected,
+          networkStats: {
+            ...?existing?.networkStats,
+            currentNetworkId!: NetworkStats(
+              networkId: currentNetworkId!,
+              successCount: currentSuccess + 1,
+              failureCount: currentFailures,
+              lastPing: delay,
+              lastTested: DateTime.now(),
+            ),
+          },
+        );
+        unawaited(_saveCache());
+
+        return ServerInfo(
+          config: uri,
+          protocol: _getProtocol(uri),
+          ping: delay,
+          name: parser.remark,
+          successRate: serverCache[uri]!.getNetworkSuccessRate(currentNetworkId!),
+        );
+      } else {
+        _recordFailure(uri);
+      }
+      return null;
+    } catch (e) {
+      _recordFailure(uri);
+      return null;
+    }
+  }
+
+  static void _recordFailure(String uri) {
+    if (currentNetworkId == null || currentNetworkId == 'none') return;
+
+    final existing = serverCache[uri];
+    if (existing != null) {
+      final currentSuccess = existing.getNetworkSuccess(currentNetworkId!);
+      final currentFailures = existing.getNetworkFailures(currentNetworkId!);
+
+      serverCache[uri] = ServerCache(
+        config: uri,
+        name: existing.name,
+        protocol: existing.protocol,
+        lastPing: existing.lastPing,
+        lastTested: DateTime.now(),
+        successCount: existing.successCount,
+        failureCount: existing.failureCount + 1,
+        lastConnected: existing.lastConnected,
+        networkStats: {
+          ...existing.networkStats,
+          currentNetworkId!: NetworkStats(
+            networkId: currentNetworkId!,
+            successCount: currentSuccess,
+            failureCount: currentFailures + 1,
+            lastPing: existing.networkStats[currentNetworkId]?.lastPing ?? existing.lastPing,
+            lastTested: DateTime.now(),
+          ),
+        },
+      );
+      unawaited(_saveCache());
+    }
+  }
+
+  static Future<List<String>> _tcpPrefilterConfigs(
+    List<String> configs, {
+    required Duration timeout,
+    required int concurrency,
+    int stopOnCount = 0,
+  }) async {
+    final survivors = <String>[];
+    int index = 0;
+
+    Future<void> worker() async {
+      while (true) {
+        if (isConnected || _cancelAutoScan) break;
+        final i = index++;
+        if (i >= configs.length) break;
+
+        final config = configs[i];
+        final hp = _extractHostPort(config);
+        if (hp == null) continue;
+
+        final ok = await _tcpProbe(hp.$1, hp.$2, timeout);
+        if (ok) {
+          survivors.add(config);
+          if (stopOnCount > 0 && survivors.length >= stopOnCount) break;
+        }
+      }
+    }
+
+    final workers = List.generate(concurrency, (_) => worker());
+    await Future.wait(workers);
+
+    return survivors;
+  }
+
+  static Future<bool> _tcpProbe(String host, int port, Duration timeout) async {
+    try {
+      final socket = await Socket.connect(host, port, timeout: timeout);
+      socket.destroy();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static (String, int)? _extractHostPort(String uri) {
+    try {
+      if (uri.startsWith('vless://') || uri.startsWith('trojan://') || uri.startsWith('ss://')) {
+        if (uri.startsWith('ss://')) {
+          final hp = _parseSSHostPort(uri);
+          if (hp != null) return hp;
+        } else {
+          final u = Uri.parse(uri);
+          final host = u.host;
+          final port = u.port != 0 ? u.port : 443;
+          if (host.isNotEmpty) return (host, port);
+        }
+      } else if (uri.startsWith('vmess://')) {
+        final hp = _parseVMessHostPort(uri);
+        if (hp != null) return hp;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  static (String, int)? _parseVMessHostPort(String uri) {
+    try {
+      final b64 = uri.substring('vmess://'.length);
+      final jsonStr = utf8.decode(base64.decode(_normalizeB64(b64)));
+      final map = jsonDecode(jsonStr) as Map<String, dynamic>;
+      final host = (map['add'] ?? '').toString();
+      final port = int.tryParse((map['port'] ?? '').toString()) ?? 443;
+      if (host.isNotEmpty) return (host, port);
+    } catch (_) {}
+    return null;
+  }
+
+  static (String, int)? _parseSSHostPort(String uri) {
+    try {
+      var rest = uri.substring('ss://'.length);
+      if (rest.contains('@')) {
+        final u = Uri.parse(uri);
+        final host = u.host;
+        final port = u.port != 0 ? u.port : 443;
+        if (host.isNotEmpty) return (host, port);
+      } else {
+        final hashIndex = rest.indexOf('#');
+        if (hashIndex != -1) rest = rest.substring(0, hashIndex);
+        final decoded = utf8.decode(base64.decode(_normalizeB64(rest)));
+        final atIndex = decoded.lastIndexOf('@');
+        if (atIndex != -1) {
+          final hostPort = decoded.substring(atIndex + 1);
+          final parts = hostPort.split(':');
+          if (parts.length == 2) {
+            final host = parts[0];
+            final port = int.tryParse(parts[1]) ?? 443;
+            if (host.isNotEmpty) return (host, port);
+          }
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  static String _normalizeB64(String b64) {
+    var s = b64.replaceAll('-', '+').replaceAll('_', '/');
+    while (s.length % 4 != 0) {
+      s += '=';
+    }
+    return s;
+  }
+
+  static String _getProtocol(String uri) {
+    if (uri.startsWith('vless://')) return 'VLESS';
+    if (uri.startsWith('vmess://')) return 'VMESS';
+    if (uri.startsWith('trojan://')) return 'TROJAN';
+    if (uri.startsWith('ss://')) return 'SS';
+    return 'UNKNOWN';
+  }
+
+  // ========================= CONNECT / DISCONNECT =========================
+  static Future<bool> connect({
+    required String vlessUri, 
+    int? ping, 
+    bool retryWithoutDoH = true,
+    bool testOnly = false,
+  }) async {
+    if (kIsWeb || !Platform.isAndroid) return false;
+
+    if (isSubscriptionExpired) {
+      debugPrint('❌ Cannot connect: Subscription expired');
+      return false;
+    }
+
+    try {
+      if (isConnected && !testOnly) {
+        _isManualDisconnect = true;
+        _isVpnStateChanging = true;
+        await disconnect();
+        _isVpnStateChanging = false;
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+
+      _isManualDisconnect = false;
+      _isVpnStateChanging = true;
+
+      // Set testing flag if testOnly to prevent false CONNECTED status
+      if (testOnly) {
+        _isTesting = true;
+      }
+
+      final parser = V2ray.parseFromURL(vlessUri);
+      var config = parser.getFullConfiguration();
+      
+      config = _ensureDnsAndIPv4(config, useDoH: false);
+
+      if (await v2ray.requestPermission()) {
+        try {
+          await v2ray.startV2Ray(
+            remark: parser.remark,
+            config: config,
+            proxyOnly: false,
+            bypassSubnets: [],
+          );
+
+          await Future.delayed(const Duration(seconds: 2));
+          
+          final delay = await v2ray.getConnectedServerDelay()
+              .timeout(const Duration(seconds: 5));
+          
+          if (delay == -1 || delay > 8000) {
+            throw Exception('Connection timeout or unhealthy');
+          }
+
+          if (testOnly) {
+            await v2ray.stopV2Ray();
+            _isTesting = false;
+            _isVpnStateChanging = false;
+            debugPrint('✅ Test connection successful (Direct DNS)');
+            return true;
+          }
+
+          currentConnectedConfig = vlessUri;
+          currentConnectedPing = ping;
+          
+          // Initialize traffic monitoring
+          _lastDataReceived = DateTime.now();
+          _lastDownloadBytes = 0;
+
+          final existing = serverCache[vlessUri];
+          if (existing != null && currentNetworkId != null && currentNetworkId != 'none') {
+            final currentSuccess = existing.getNetworkSuccess(currentNetworkId!);
+            final currentFailures = existing.getNetworkFailures(currentNetworkId!);
+
+            serverCache[vlessUri] = ServerCache(
+              config: vlessUri,
+              name: existing.name,
+              protocol: existing.protocol,
+              lastPing: existing.lastPing,
+              lastTested: existing.lastTested,
+              successCount: existing.successCount + 1,
+              failureCount: existing.failureCount,
+              lastConnected: DateTime.now(),
+              networkStats: {
+                ...existing.networkStats,
+                currentNetworkId!: NetworkStats(
+                  networkId: currentNetworkId!,
+                  successCount: currentSuccess + 1,
+                  failureCount: currentFailures,
+                  lastPing: ping ?? existing.lastPing,
+                  lastTested: DateTime.now(),
+                ),
+              },
+            );
+          } else if (currentNetworkId != null && currentNetworkId != 'none') {
+            serverCache[vlessUri] = ServerCache(
+              config: vlessUri,
+              name: parser.remark,
+              protocol: _getProtocol(vlessUri),
+              lastPing: ping ?? -1,
+              lastTested: DateTime.now(),
+              successCount: 1,
+              lastConnected: DateTime.now(),
+              networkStats: {
+                currentNetworkId!: NetworkStats(
+                  networkId: currentNetworkId!,
+                  successCount: 1,
+                  failureCount: 0,
+                  lastPing: ping ?? -1,
+                  lastTested: DateTime.now(),
+                ),
+              },
+            );
+          }
+
+          lastGoodServer = vlessUri;
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('last_good_server', vlessUri);
+          unawaited(_saveCache());
+
+          _isTesting = false;
+          _isVpnStateChanging = false;
+          debugPrint('✅ Connected successfully (Direct DNS) on $currentNetworkName');
+          return true;
+          
+        } catch (e) {
+          debugPrint('⚠️ Direct DNS connection failed: $e');
+          
+          if (retryWithoutDoH && !testOnly) {
+            debugPrint('🔄 Retrying with DoH...');
+            await v2ray.stopV2Ray();
+            await Future.delayed(const Duration(milliseconds: 500));
+            
+            config = parser.getFullConfiguration();
+            config = _ensureDnsAndIPv4(config, useDoH: true);
+            
+            await v2ray.startV2Ray(
+              remark: parser.remark,
+              config: config,
+              proxyOnly: false,
+              bypassSubnets: [],
+            );
+
+            await Future.delayed(const Duration(seconds: 2));
+            final delay = await v2ray.getConnectedServerDelay()
+                .timeout(const Duration(seconds: 5));
+            
+            if (delay != -1 && delay < 8000) {
+              if (testOnly) {
+                await v2ray.stopV2Ray();
+                _isTesting = false;
+                _isVpnStateChanging = false;
+                debugPrint('✅ Test connection successful (DoH)');
+                return true;
+              }
+
+              currentConnectedConfig = vlessUri;
+              currentConnectedPing = ping;
+              
+              // Initialize traffic monitoring
+              _lastDataReceived = DateTime.now();
+              _lastDownloadBytes = 0;
+              
+              lastGoodServer = vlessUri;
+              final prefs = await SharedPreferences.getInstance();
+              await prefs.setString('last_good_server', vlessUri);
+              
+              _isTesting = false;
+              _isVpnStateChanging = false;
+              debugPrint('✅ Connected successfully (DoH fallback) on $currentNetworkName');
+              return true;
+            }
+          }
+          
+          throw e;
+        }
+      }
+      _isTesting = false;
+      _isVpnStateChanging = false;
+      return false;
+    } catch (e) {
+      _isTesting = false;
+      _isVpnStateChanging = false;
+      
+      final existing = serverCache[vlessUri];
+      if (existing != null && currentNetworkId != null && currentNetworkId != 'none') {
+        final currentSuccess = existing.getNetworkSuccess(currentNetworkId!);
+        final currentFailures = existing.getNetworkFailures(currentNetworkId!);
+
+        serverCache[vlessUri] = ServerCache(
+          config: vlessUri,
+          name: existing.name,
+          protocol: existing.protocol,
+          lastPing: existing.lastPing,
+          lastTested: existing.lastTested,
+          successCount: existing.successCount,
+          failureCount: existing.failureCount + 1,
+          networkStats: {
+            ...existing.networkStats,
+            currentNetworkId!: NetworkStats(
+              networkId: currentNetworkId!,
+              successCount: currentSuccess,
+              failureCount: currentFailures + 1,
+              lastPing: existing.networkStats[currentNetworkId]?.lastPing ?? existing.lastPing,
+              lastTested: DateTime.now(),
+            ),
+          },
+        );
+        unawaited(_saveCache());
+      }
+      debugPrint('❌ Connection error: $e');
+      return false;
+    }
+  }
+
+  static Future<bool> connectToLastGoodServer() async {
+    if (isSubscriptionExpired) {
+      debugPrint('❌ Cannot connect: Subscription expired');
+      return false;
+    }
+
+    if (lastGoodServer != null && lastGoodServer!.isNotEmpty) {
+      debugPrint('🔵 Connecting to last good server...');
+      final cached = serverCache[lastGoodServer];
+      return await connect(
+        vlessUri: lastGoodServer!,
+        ping: cached?.lastPing,
+      );
+    }
+    return false;
+  }
+
+  static Future<void> disconnect() async {
+    try {
+      _isManualDisconnect = true;
+      _cancelAutoScan = true;
+
+      if (isConnected && (sessionDownload > 0 || sessionUpload > 0)) {
+        final today = DateTime.now();
+        final todayStats = dailyStats.firstWhere(
+          (s) =>
+              s.date.year == today.year &&
+              s.date.month == today.month &&
+              s.date.day == today.day,
+          orElse: () => ConnectionStats(
+            totalDownload: 0,
+            totalUpload: 0,
+            date: today,
+          ),
+        );
+
+        dailyStats.removeWhere((s) =>
+            s.date.year == today.year &&
+            s.date.month == today.month &&
+            s.date.day == today.day);
+
+        dailyStats.add(ConnectionStats(
+          totalDownload: todayStats.totalDownload + sessionDownload,
+          totalUpload: todayStats.totalUpload + sessionUpload,
+          date: today,
+        ));
+
+        await _saveStats();
+      }
+
+      await v2ray.stopV2Ray();
+      debugPrint('✅ Disconnected');
+
+      // Save current network profile before potential auto-scan
+      await _saveCurrentNetworkProfile();
+
+      if (fastestServers.length < MAX_DISPLAY_SERVERS && 
+          currentSubscriptionLink != null && 
+          !isSubscriptionExpired &&
+          currentNetworkId != 'none') {
+        debugPrint('🔵 Disconnected, resuming auto-scan for more servers...');
+        await Future.delayed(const Duration(milliseconds: 500));
+        unawaited(_autoScanServers(resumeFromIndex: _lastScannedIndex));
+      }
+    } catch (e) {
+      debugPrint('❌ Disconnect error: $e');
+    } finally {
+      isConnected = false;
+      currentConnectedConfig = null;
+      currentConnectedPing = null;
+      sessionDownload = 0;
+      sessionUpload = 0;
+      _lastConnectionTime = null;
+      _lastDataReceived = null;
+      _lastDownloadBytes = 0;
+      connectionStateController.add(false);
+    }
+  }
+
+  static void dispose() {
+    _healthCheckTimer?.cancel();
+    _subscriptionRefreshTimer?.cancel();
+    _networkSubscription?.cancel();
+    _networkChangeDebounceTimer?.cancel();
+    serversStreamController.close();
+    connectionStateController.close();
+    statusStreamController.close();
+    scanProgressController.close();
+    subscriptionExpiredController.close();
+    networkChangeController.close();
+  }
+}
+
+// Helper to ignore unawaited futures
+void unawaited(Future<void> future) {}
+
+class ConnectionStats {
+  final int totalDownload;
+  final int totalUpload;
+  final DateTime date;
+
+  ConnectionStats({
+    required this.totalDownload,
+    required this.totalUpload,
+    required this.date,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'totalDownload': totalDownload,
+    'totalUpload': totalUpload,
+    'date': date.toIso8601String(),
+  };
+
+  factory ConnectionStats.fromJson(Map<String, dynamic> json) => ConnectionStats(
+    totalDownload: json['totalDownload'] ?? 0,
+    totalUpload: json['totalUpload'] ?? 0,
+    date: DateTime.parse(json['date']),
+  );
+}
