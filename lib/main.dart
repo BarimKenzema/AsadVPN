@@ -228,30 +228,40 @@ class _VPNHomePageState extends State<VPNHomePage> with WidgetsBindingObserver {
     
     if (state == AppLifecycleState.resumed) {
       debugPrint('📱 App resumed from background');
-      _updateConnectionStatus();
       
-      // FIX 1: Always refresh server list when app resumes
-      if (VPNService.fastestServers.isNotEmpty) {
-        setState(() {
-          displayServers = List.from(VPNService.fastestServers);
-        });
-        debugPrint('✅ Refreshed server list: ${displayServers.length} servers');
-      }
-      
-      // FIX 2: Check connection health if connected
-      if (VPNService.isConnected) {
-        debugPrint('🔍 Checking connection health after resume...');
-        VPNService.checkConnectionHealth();
-      }
-      
-      // Resume auto-scan if not connected
-      if (!VPNService.isConnected && 
-          VPNService.fastestServers.length < VPNService.MAX_DISPLAY_SERVERS &&
-          VPNService.currentSubscriptionLink != null &&
-          !VPNService.isScanning) {
-        debugPrint('🔵 Resuming auto-scan (${VPNService.fastestServers.length}/${VPNService.MAX_DISPLAY_SERVERS} servers)...');
-        VPNService.resumeAutoScan();
-      }
+      // FIX: Wait a bit for network detection to stabilize
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (!mounted) return;
+        
+        _updateConnectionStatus();
+        
+        // FIX: Always refresh server list when app resumes (even if connected)
+        if (VPNService.fastestServers.isNotEmpty) {
+          setState(() {
+            displayServers = List.from(VPNService.fastestServers);
+          });
+          debugPrint('✅ Refreshed server list: ${displayServers.length} servers');
+        } else if (VPNService.isConnected && VPNService.currentNetworkId != null && VPNService.currentNetworkId != 'none') {
+          // FIX: If connected but servers are empty, reload from network profile
+          debugPrint('⚠️ Connected but no servers displayed, reloading profile...');
+          VPNService.reloadCurrentNetworkProfile();
+        }
+        
+        // FIX: Check connection health if connected (this will detect dead connections)
+        if (VPNService.isConnected) {
+          debugPrint('🔍 Checking connection health after resume...');
+          VPNService.checkConnectionHealth();
+        }
+        
+        // Resume auto-scan if not connected
+        if (!VPNService.isConnected && 
+            VPNService.fastestServers.length < VPNService.MAX_DISPLAY_SERVERS &&
+            VPNService.currentSubscriptionLink != null &&
+            !VPNService.isScanning) {
+          debugPrint('🔵 Resuming auto-scan (${VPNService.fastestServers.length}/${VPNService.MAX_DISPLAY_SERVERS} servers)...');
+          VPNService.resumeAutoScan();
+        }
+      });
     } else if (state == AppLifecycleState.paused) {
       debugPrint('📱 App going to background (scan will pause and resume when you return)');
     }
