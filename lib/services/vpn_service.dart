@@ -299,26 +299,59 @@ class VPNService {
     });
   }
 
-  // ========================= CHECK CONNECTION HEALTH (MANUAL) =========================
+  // ========================= CHECK CONNECTION HEALTH (MANUAL) - WITH REAL INTERNET TEST =========================
   static Future<void> checkConnectionHealth() async {
     if (!isConnected || _isManualDisconnect) return;
     
     try {
-      debugPrint('🔍 Manual health check...');
+      debugPrint('🔍 Manual health check - testing REAL internet connectivity...');
+      
+      // Test 1: Check VPN server delay
       final delay = await v2ray.getConnectedServerDelay()
           .timeout(const Duration(seconds: 6));
       
       if (delay == -1 || delay > 5000) {
-        debugPrint('⚠️ Connection unhealthy (delay: ${delay}ms), reconnecting...');
+        debugPrint('⚠️ VPN server unhealthy (delay: ${delay}ms), reconnecting...');
         _handleDisconnect();
-      } else {
-        debugPrint('✅ Connection healthy (${delay}ms)');
-        // Refresh server list in UI
-        serversStreamController.add(List.from(fastestServers));
+        return;
       }
+      
+      // Test 2: REAL internet test through VPN (ping Google DNS)
+      debugPrint('🔍 Testing real internet through VPN...');
+      final hasRealInternet = await _testRealInternetThroughVPN();
+      
+      if (!hasRealInternet) {
+        debugPrint('⚠️ VPN connected but NO real internet access, reconnecting...');
+        _handleDisconnect();
+        return;
+      }
+      
+      debugPrint('✅ Connection healthy (${delay}ms, internet OK)');
+      // Refresh server list in UI
+      serversStreamController.add(List.from(fastestServers));
     } catch (e) {
       debugPrint('⚠️ Health check failed: $e - triggering reconnect');
       _handleDisconnect();
+    }
+  }
+
+  // ========================= TEST REAL INTERNET THROUGH VPN =========================
+  static Future<bool> _testRealInternetThroughVPN() async {
+    try {
+      // Try to resolve a domain through the VPN tunnel
+      final result = await InternetAddress.lookup('dns.google')
+          .timeout(const Duration(seconds: 4));
+      
+      if (result.isEmpty) {
+        debugPrint('❌ DNS lookup failed - no internet through VPN');
+        return false;
+      }
+      
+      debugPrint('✅ Real internet test passed');
+      return true;
+    } catch (e) {
+      debugPrint('❌ Real internet test failed: $e');
+      return false;
     }
   }
 
@@ -477,16 +510,59 @@ class VPNService {
           lastUsed: DateTime.now(),
         );
         
-        // DON'T clear display if VPN is connected
-        if (!isConnected) {
+        // FIX: NEVER clear display if VPN is connected OR if we have servers
+        if (!isConnected && fastestServers.isEmpty) {
           fastestServers.clear();
           serversStreamController.add([]);
         } else {
-          debugPrint('🔵 Keeping current servers (VPN connected)');
+          debugPrint('🔵 Keeping current servers (VPN connected or servers exist)');
+          // Keep existing servers and update stream
+          serversStreamController.add(List.from(fastestServers));
         }
       }
     } catch (e) {
       debugPrint('❌ Load network profile error: $e');
+    }
+  }
+
+  // ========================= RELOAD CURRENT NETWORK PROFILE (FOR UI REFRESH) =========================
+  static Future<void> reloadCurrentNetworkProfile() async {
+    if (currentNetworkId == null || currentNetworkId == 'none') return;
+    
+    try {
+      debugPrint('🔄 Reloading profile for $currentNetworkName...');
+      
+      final profile = networkProfiles[currentNetworkId];
+      if (profile != null && profile.topServers.isNotEmpty) {
+        fastestServers = profile.topServers.map((config) {
+          final cached = serverCache[config];
+          if (cached != null) {
+            return ServerInfo(
+              config: config,
+              protocol: cached.protocol,
+              ping: cached.getNetworkPing(currentNetworkId!) ?? cached.lastPing,
+              name: cached.name,
+              successRate: cached.getNetworkSuccessRate(currentNetworkId!),
+              lastConnected: cached.lastConnected,
+            );
+          } else {
+            return ServerInfo(
+              config: config,
+              protocol: _getProtocol(config),
+              ping: 999,
+              name: 'Server',
+              successRate: 0,
+            );
+          }
+        }).toList();
+        
+        _sortServersBySuccessRateAndPing();
+        _enforceServerLimit();
+        serversStreamController.add(List.from(fastestServers));
+        debugPrint('✅ Reloaded ${fastestServers.length} servers');
+      }
+    } catch (e) {
+      debugPrint('❌ Reload profile error: $e');
     }
   }
 
@@ -962,28 +1038,41 @@ class VPNService {
     }
   }
 
-  // ========================= IMPROVED HEALTH CHECK (4 SECONDS) =========================
+  // ========================= IMPROVED HEALTH CHECK (EVERY 5 SECONDS WITH REAL INTERNET TEST) =========================
   static void _startHealthCheck() {
     _healthCheckTimer?.cancel();
-    _healthCheckTimer = Timer.periodic(const Duration(seconds: 4), (timer) async {
+    _healthCheckTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
       if (isConnected && !_isManualDisconnect) {
         try {
-          // Check 1: Server delay
+          // Check 1: VPN Server delay
           final delay = await v2ray.getConnectedServerDelay()
-              .timeout(const Duration(seconds: 5));
-          
-          // Check 2: Traffic monitoring (no data received for 15 seconds)
-          final now = DateTime.now();
-          final lastData = _lastDataReceived ?? now;
-          final noDataDuration = now.difference(lastData);
+              .timeout(const Duration(seconds: 4));
           
           if (delay == -1 || delay > 5000) {
             debugPrint('⚠️ Connection unhealthy (delay: ${delay}ms), reconnecting...');
             _handleDisconnect();
-          } else if (noDataDuration.inSeconds > 15) {
+            return;
+          }
+          
+          // Check 2: Real internet test (every 5 seconds)
+          final hasInternet = await _testRealInternetThroughVPN();
+          if (!hasInternet) {
+            debugPrint('⚠️ VPN up but NO internet access, reconnecting...');
+            _handleDisconnect();
+            return;
+          }
+          
+          // Check 3: Traffic monitoring (no data for 20 seconds)
+          final now = DateTime.now();
+          final lastData = _lastDataReceived ?? now;
+          final noDataDuration = now.difference(lastData);
+          
+          if (noDataDuration.inSeconds > 20) {
             debugPrint('⚠️ No traffic for ${noDataDuration.inSeconds}s (frozen connection), reconnecting...');
             _handleDisconnect();
+            return;
           }
+          
         } catch (e) {
           // FIX: Don't silently fail - trigger reconnect on exception
           debugPrint('⚠️ Health check exception: $e - triggering reconnect');
